@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { Box, Text, Stack, ThemeIcon, rem, Tooltip } from '@mantine/core';
+import { Box, Text, Stack, ThemeIcon, rem, Tooltip, UnstyledButton } from '@mantine/core';
 import {
     IconLayoutDashboard,
     IconServer,
     IconRocket,
     IconCalendar,
 } from '@tabler/icons-react';
+import { useEffect } from 'react';
+import TerminalDrawer from './Terminal/TerminalDrawer';
 
 const NAV = [
     { to: '/dashboard', label: 'Dashboard', icon: IconLayoutDashboard },
@@ -17,6 +19,20 @@ const NAV = [
 
 export default function Layout({ children }) {
     const location = useLocation();
+    const [terminalOpened, setTerminalOpened] = useState(false);
+
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if (e.key === 'F12') {
+                e.preventDefault();
+                setTerminalOpened((o) => !o);
+            } else if (e.key === 'Escape') {
+                setTerminalOpened(false);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, []);
 
     return (
         <Box style={{ display: 'flex', minHeight: '100vh', width: '100%', background: 'var(--bg)' }}>
@@ -83,7 +99,41 @@ export default function Layout({ children }) {
             </Box>
 
             {/* Main content */}
-            <Box style={{ flex: 1, overflowY: 'auto', padding: '2rem' }}>
+            <Box style={{ flex: 1, overflowY: 'auto', padding: '2rem', position: 'relative' }}>
+                <TerminalDrawer
+                    opened={terminalOpened}
+                    onClose={() => setTerminalOpened(false)}
+                />
+
+                {/* Terminal Hint Bar */}
+                <UnstyledButton
+                    onClick={() => setTerminalOpened(true)}
+                    pos="absolute"
+                    top={0}
+                    left="50%"
+                    style={{
+                        transform: 'translateX(-50%)',
+                        zIndex: 10,
+                        border: '1px solid var(--border)',
+                        borderTop: 0,
+                        borderRadius: '0 0 8px 8px',
+                        transition: 'all 0.2s',
+                    }}
+                    px="md"
+                    py={2}
+                    bg="rgba(0, 188, 212, 0.05)"
+                    onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(0, 188, 212, 0.1)';
+                    }}
+                    onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'rgba(0, 188, 212, 0.05)';
+                    }}
+                >
+                    <Text size="10px" fw={700} c="dimmed" tt="uppercase" lts="0.5px">
+                        Press F12 to open a terminal
+                    </Text>
+                </UnstyledButton>
+
                 {children}
             </Box>
         </Box>
