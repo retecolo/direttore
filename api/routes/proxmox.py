@@ -12,8 +12,13 @@ from api.services.proxmox import storage as px_stor
 from api.schemas.proxmox import (
     NICConfig, CreateVMRequest, LXCNICConfig, CreateLXCRequest
 )
+from api.config import settings
 
 router = APIRouter(prefix="/api/proxmox", tags=["proxmox"])
+
+# In-memory track of instances that we are pretending are running
+# because nested virtualization fails in the Docker mock environment
+MOCK_RUNNING_INSTANCES: set[str] = set()
 
 
 def _proxmox_error(e: Exception) -> str:
@@ -74,7 +79,24 @@ def get_storage(node: str) -> list[dict[str, Any]]:
 @router.get("/nodes/{node}/vms")
 def get_vms(node: str) -> list[dict[str, Any]]:
     """List all QEMU VMs on a node."""
-    return px_vms.list_vms(node)
+    vms = px_vms.list_vms(node)
+    for vm in vms:
+        if f"{node}_vm_{vm['vmid']}" in MOCK_RUNNING_INSTANCES:
+            vm["status"] = "running"
+    return vms
+
+
+@router.get("/nodes/{node}/vms/{vmid}")
+def get_vm_details(node: str, vmid: int) -> dict[str, Any]:
+    """Get detailed configuration and status for a specific VM."""
+    try:
+        details = px_vms.get_vm_details(node, vmid)
+        # Mock intercept status injection
+        if f"{node}_vm_{vmid}" in MOCK_RUNNING_INSTANCES:
+            details["status"]["status"] = "running"
+        return details
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.post("/nodes/{node}/vms", status_code=202)
@@ -86,14 +108,27 @@ def create_vm(node: str, req: CreateVMRequest) -> dict[str, Any]:
         "cores": req.cores,
         "memory": req.memory,
         "ostype": req.ostype,
+        "kvm": 1 if req.kvm else 0,
     }
-    # Attach NICs (net0, net1, …).
     for idx, nic in enumerate(req.nics):
         params[f"net{idx}"] = nic.to_proxmox_net_string()
+        ipconf = nic.to_proxmox_ipconfig_string()
+        if ipconf:
+            params[f"ipconfig{idx}"] = ipconf
+
+    # Cloud-init User/Auth Configuration
+    if req.username:
+        params["ciuser"] = req.username
+    if req.password:
+        params["cipassword"] = req.password
+    if req.ssh_key:
+        params["sshkeys"] = req.ssh_key
 
     if req.iso:
         params["cdrom"] = req.iso
-        params["scsi0"] = f"{req.storage}:vm-{req.vmid}-disk-0,size={req.disk}"
+        disk_val = req.disk.rstrip("Gg")
+        params["scsi0"] = f"{req.storage}:{disk_val}"
+        params["ide2"] = f"{req.storage}:cloudinit"
 
     try:
         upid = px_vms.create_vm(node, params)
@@ -109,6 +144,15 @@ def vm_action(
     action: Literal["start", "stop", "reboot", "shutdown", "delete"],
 ) -> dict[str, Any]:
     """Start, stop, reboot, shutdown, or delete a VM."""
+    # MOCK INTERCEPT: The dev environment running in Docker cannot handle nested KVM virtualization
+    if settings.proxmox_mock and node == "pve-01" and action in ("start", "stop"):
+        if action == "start":
+            MOCK_RUNNING_INSTANCES.add(f"{node}_vm_{vmid}")
+        else:
+            MOCK_RUNNING_INSTANCES.discard(f"{node}_vm_{vmid}")
+        mock_upid = f"UPID:{node}:00000000:00000000:00000000:mock{action}:{vmid}:root@pam:"
+        return {"upid": mock_upid, "node": node, "vmid": vmid, "action": action}
+
     try:
         upid = px_vms.action_vm(node, vmid, action)
         return {"upid": upid, "node": node, "vmid": vmid, "action": action}
@@ -123,7 +167,24 @@ def vm_action(
 @router.get("/nodes/{node}/lxc")
 def get_containers(node: str) -> list[dict[str, Any]]:
     """List all LXC containers on a node."""
-    return px_ct.list_containers(node)
+    cts = px_ct.list_containers(node)
+    for ct in cts:
+        if f"{node}_lxc_{ct['vmid']}" in MOCK_RUNNING_INSTANCES:
+            ct["status"] = "running"
+    return cts
+
+
+@router.get("/nodes/{node}/lxc/{vmid}")
+def get_container_details(node: str, vmid: int) -> dict[str, Any]:
+    """Get detailed configuration and status for a specific LXC container."""
+    try:
+        details = px_ct.get_container_details(node, vmid)
+        # Mock intercept status injection
+        if f"{node}_lxc_{vmid}" in MOCK_RUNNING_INSTANCES:
+            details["status"]["status"] = "running"
+        return details
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.post("/nodes/{node}/lxc", status_code=202)
@@ -165,6 +226,15 @@ def container_action(
     action: Literal["start", "stop", "reboot", "shutdown", "delete"],
 ) -> dict[str, Any]:
     """Start, stop, reboot, shutdown, or delete a container."""
+    # MOCK INTERCEPT: The dev environment running in Docker cannot handle unprivileged mounts
+    if settings.proxmox_mock and node == "pve-01" and action in ("start", "stop"):
+        if action == "start":
+            MOCK_RUNNING_INSTANCES.add(f"{node}_lxc_{vmid}")
+        else:
+            MOCK_RUNNING_INSTANCES.discard(f"{node}_lxc_{vmid}")
+        mock_upid = f"UPID:{node}:00000000:00000000:00000000:mock{action}:{vmid}:root@pam:"
+        return {"upid": mock_upid, "node": node, "vmid": vmid, "action": action}
+
     try:
         upid = px_ct.action_container(node, vmid, action)
         return {"upid": upid, "node": node, "vmid": vmid, "action": action}
@@ -189,6 +259,9 @@ def get_templates(node: str) -> list[dict[str, Any]]:
 @router.get("/tasks/{node}/{upid:path}")
 def get_task(node: str, upid: str) -> dict[str, Any]:
     """Poll a Proxmox task by UPID. Returns status and exitstatus when done."""
+    if "mockstart" in upid or "mockstop" in upid:
+        return {"status": "stopped", "exitstatus": "OK"}
+
     try:
         return px_vms.get_task_status(node, upid)
     except Exception as e:
