@@ -67,8 +67,8 @@ export default function TopologySidebar({ resources, loading }) {
                                                 {res.type === 'vm' ? <IconServer size={14} /> : <IconBox size={14} />}
                                             </ThemeIcon>
                                             <Box style={{ flex: 1, overflow: 'hidden' }}>
-                                                <Text size="xs" fw={500} truncate>{res.name || res.hostname}</Text>
-                                                <Text size="10px" c="dimmed">ID: {res.vmid} • {res.node}</Text>
+                                                <Text size="sm" fw={500} truncate>{res.name || res.hostname}</Text>
+                                                <Text size="xs" c="dimmed">ID: {res.vmid} • {res.node}</Text>
                                             </Box>
                                         </Group>
                                     </Paper>

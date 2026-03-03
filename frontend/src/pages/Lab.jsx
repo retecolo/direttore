@@ -13,8 +13,26 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
+// Add custom styles for selection
+const selectionStyles = `
+  .react-flow__edge.selected .react-flow__edge-path {
+    stroke: var(--mantine-color-cyan-6) !important;
+    stroke-width: 3 !important;
+    filter: drop-shadow(0 0 5px var(--mantine-color-cyan-6));
+  }
+  .react-flow__node.selected > div {
+    border-color: var(--mantine-color-cyan-6) !important;
+    box-shadow: 0 0 15px rgba(0, 188, 212, 0.4) !important;
+  }
+`;
+
 import { getNodes, getVMs, getContainers } from '../api/proxmox';
 import TopologySidebar from '../features/topology/components/TopologySidebar';
+import ResourceNode from '../features/topology/components/nodes/ResourceNode';
+
+const nodeTypes = {
+    resource: ResourceNode
+};
 
 // Inner component to access the useReactFlow hook
 function LabCanvas({ allResources, isLoading }) {
@@ -31,7 +49,11 @@ function LabCanvas({ allResources, isLoading }) {
         []
     );
     const onConnect = useCallback(
-        (params) => setEdges((eds) => addEdge(params, eds)),
+        (params) => setEdges((eds) => addEdge({
+            ...params,
+            style: { stroke: '#ffffff', strokeWidth: 1.5 },
+            interactionWidth: 20
+        }, eds)),
         []
     );
 
@@ -39,6 +61,20 @@ function LabCanvas({ allResources, isLoading }) {
         event.preventDefault();
         event.dataTransfer.dropEffect = 'move';
     }, []);
+
+    const onNodesDelete = useCallback(
+        (deleted) => {
+            setNodes((nds) => nds.filter((node) => !deleted.find((d) => d.id === node.id)));
+        },
+        []
+    );
+
+    const onEdgesDelete = useCallback(
+        (deleted) => {
+            setEdges((eds) => eds.filter((edge) => !deleted.find((d) => d.id === edge.id)));
+        },
+        []
+    );
 
     const onDrop = useCallback(
         (event) => {
@@ -48,6 +84,12 @@ function LabCanvas({ allResources, isLoading }) {
             if (!data) return;
 
             const labData = JSON.parse(data);
+
+            // Prevent duplicate resources on canvas
+            if (nodes.some(n => n.data.vmid === labData.vmid)) {
+                return;
+            }
+
             const position = screenToFlowPosition({
                 x: event.clientX,
                 y: event.clientY,
@@ -55,14 +97,14 @@ function LabCanvas({ allResources, isLoading }) {
 
             const newNode = {
                 id: `${labData.node}-${labData.type}-${labData.vmid}-${Date.now()}`,
-                type: 'default', // Using default node type for Step 3
+                type: 'resource',
                 position,
-                data: { label: `${labData.name} (ID: ${labData.vmid})` },
+                data: { ...labData },
             };
 
             setNodes((nds) => nds.concat(newNode));
         },
-        [screenToFlowPosition]
+        [screenToFlowPosition, nodes]
     );
 
     return (
@@ -85,15 +127,21 @@ function LabCanvas({ allResources, isLoading }) {
                 <ReactFlow
                     nodes={nodes}
                     edges={edges}
+                    nodeTypes={nodeTypes}
                     onNodesChange={onNodesChange}
                     onEdgesChange={onEdgesChange}
+                    onNodesDelete={onNodesDelete}
+                    onEdgesDelete={onEdgesDelete}
                     onConnect={onConnect}
                     onDragOver={onDragOver}
                     onDrop={onDrop}
+                    connectionMode="loose"
+                    snapToGrid
+                    snapGrid={[15, 15]}
                     fitView
                     colorMode="dark"
                 >
-                    <Background variant="dots" gap={12} size={1} color="rgba(255,255,255,0.1)" />
+                    <Background variant="dots" gap={15} size={1} color="rgba(255,255,255,0.1)" />
                     <Controls />
                 </ReactFlow>
             </Box>
@@ -130,6 +178,7 @@ export default function Lab() {
 
     return (
         <ReactFlowProvider>
+            <style>{selectionStyles}</style>
             <Box style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)' }}>
                 <Group justify="space-between" mb="lg">
                     <Box>

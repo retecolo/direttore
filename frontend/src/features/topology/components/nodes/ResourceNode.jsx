@@ -19,7 +19,18 @@ export default function ResourceNode({ data }) {
                 position: 'relative',
             }}
         >
-            <Handle type="target" position={Position.Left} style={{ background: '#555' }} />
+            <Handle
+                type="source"
+                id="left"
+                position={Position.Left}
+                isConnectable={true}
+                style={{
+                    width: 10,
+                    height: 10,
+                    background: '#888',
+                    border: '2px solid var(--surface)'
+                }}
+            />
 
             <Group gap="sm" wrap="nowrap">
                 <ThemeIcon
@@ -42,7 +53,18 @@ export default function ResourceNode({ data }) {
                 </Box>
             </Group>
 
-            <Handle type="source" position={Position.Right} style={{ background: '#555' }} />
+            <Handle
+                type="source"
+                id="right"
+                position={Position.Right}
+                isConnectable={true}
+                style={{
+                    width: 10,
+                    height: 10,
+                    background: '#888',
+                    border: '2px solid var(--surface)'
+                }}
+            />
         </Paper>
     );
 }
