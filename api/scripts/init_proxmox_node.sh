@@ -2,7 +2,7 @@
 # Initialize a Proxmox Docker container for local development
 # Sets the root password, updates appliances, downloads LXC templates, and stubs ISOs.
 
-CONTAINER=${1:-pve-01}
+CONTAINER=${1:-direttorefork-proxmox-1}
 
 echo "Initializing Proxmox node inside container: $CONTAINER"
 
