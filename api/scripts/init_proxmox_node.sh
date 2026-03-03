@@ -2,7 +2,7 @@
 # Initialize a Proxmox Docker container for local development
 # Sets the root password, updates appliances, downloads LXC templates, and stubs ISOs.
 
-CONTAINER=${1:-pve-01}
+CONTAINER=${1:-direttorefork-proxmox-1}
 
 echo "Initializing Proxmox node inside container: $CONTAINER"
 
@@ -29,5 +29,11 @@ docker exec "$CONTAINER" ip link add name vmbr0 type bridge 2>/dev/null || true
 docker exec "$CONTAINER" ip link set dev vmbr0 up 2>/dev/null || true
 docker exec "$CONTAINER" ip link add name vmbr1 type bridge 2>/dev/null || true
 docker exec "$CONTAINER" ip link set dev vmbr1 up 2>/dev/null || true
+
+echo "7. Regenerating SSL certificates (fixes 'failed to use local certificate chain' error)..."
+# Remove invalid/0-byte keys and force regeneration
+docker exec "$CONTAINER" rm -f /etc/pve/priv/pve-root-ca.key
+docker exec "$CONTAINER" pvecm updatecerts -f
+docker exec "$CONTAINER" systemctl restart pveproxy
 
 echo "Initialization of $CONTAINER complete!"

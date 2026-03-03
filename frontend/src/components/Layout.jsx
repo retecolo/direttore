@@ -1,17 +1,20 @@
 import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { Box, Text, Stack, ThemeIcon, rem, Tooltip } from '@mantine/core';
+import { Box, Text, Stack, ThemeIcon, rem, Tooltip, UnstyledButton } from '@mantine/core';
 import {
     IconLayoutDashboard,
     IconServer,
     IconRocket,
     IconCalendar,
+    IconFlask,
 } from '@tabler/icons-react';
+import { useEffect } from 'react';
 
 const NAV = [
     { to: '/dashboard', label: 'Dashboard', icon: IconLayoutDashboard },
     { to: '/resources', label: 'Resources', icon: IconServer },
     { to: '/provision', label: 'Provision', icon: IconRocket },
+    { to: '/lab', label: 'Lab', icon: IconFlask },
     { to: '/reservations', label: 'Reservations', icon: IconCalendar },
 ];
 
@@ -83,7 +86,7 @@ export default function Layout({ children }) {
             </Box>
 
             {/* Main content */}
-            <Box style={{ flex: 1, overflowY: 'auto', padding: '2rem' }}>
+            <Box style={{ flex: 1, overflowY: 'auto', padding: '2rem', position: 'relative' }}>
                 {children}
             </Box>
         </Box>
