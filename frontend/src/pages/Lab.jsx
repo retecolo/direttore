@@ -1,10 +1,105 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Box, Group, Title, Text, LoadingOverlay } from '@mantine/core';
+import {
+    ReactFlow,
+    ReactFlowProvider,
+    Background,
+    Controls,
+    useReactFlow,
+    applyNodeChanges,
+    applyEdgeChanges,
+    addEdge
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 
-// Note: React Flow imports removed until Step 3 to prevent build errors
 import { getNodes, getVMs, getContainers } from '../api/proxmox';
 import TopologySidebar from '../features/topology/components/TopologySidebar';
+
+// Inner component to access the useReactFlow hook
+function LabCanvas({ allResources, isLoading }) {
+    const [nodes, setNodes] = useState([]);
+    const [edges, setEdges] = useState([]);
+    const { screenToFlowPosition } = useReactFlow();
+
+    const onNodesChange = useCallback(
+        (changes) => setNodes((nds) => applyNodeChanges(changes, nds)),
+        []
+    );
+    const onEdgesChange = useCallback(
+        (changes) => setEdges((eds) => applyEdgeChanges(changes, eds)),
+        []
+    );
+    const onConnect = useCallback(
+        (params) => setEdges((eds) => addEdge(params, eds)),
+        []
+    );
+
+    const onDragOver = useCallback((event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+    }, []);
+
+    const onDrop = useCallback(
+        (event) => {
+            event.preventDefault();
+
+            const data = event.dataTransfer.getData('application/reactflow');
+            if (!data) return;
+
+            const labData = JSON.parse(data);
+            const position = screenToFlowPosition({
+                x: event.clientX,
+                y: event.clientY,
+            });
+
+            const newNode = {
+                id: `${labData.node}-${labData.type}-${labData.vmid}-${Date.now()}`,
+                type: 'default', // Using default node type for Step 3
+                position,
+                data: { label: `${labData.name} (ID: ${labData.vmid})` },
+            };
+
+            setNodes((nds) => nds.concat(newNode));
+        },
+        [screenToFlowPosition]
+    );
+
+    return (
+        <Box style={{ display: 'flex', flex: 1, gap: 'md', position: 'relative' }}>
+            <TopologySidebar
+                resources={allResources}
+                loading={isLoading}
+            />
+
+            <Box
+                style={{
+                    flex: 1,
+                    border: '1px solid var(--border)',
+                    borderRadius: '12px',
+                    background: 'rgba(0,0,0,0.2)',
+                    overflow: 'hidden',
+                    position: 'relative'
+                }}
+            >
+                <ReactFlow
+                    nodes={nodes}
+                    edges={edges}
+                    onNodesChange={onNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    onConnect={onConnect}
+                    onDragOver={onDragOver}
+                    onDrop={onDrop}
+                    fitView
+                    colorMode="dark"
+                >
+                    <Background variant="dots" gap={12} size={1} color="rgba(255,255,255,0.1)" />
+                    <Controls />
+                </ReactFlow>
+            </Box>
+        </Box>
+    );
+}
 
 export default function Lab() {
     // Fetch resources
@@ -34,36 +129,17 @@ export default function Lab() {
     const isLoading = nodesQ.isLoading || vmsQ.isLoading || lxcQ.isLoading;
 
     return (
-        <Box style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)' }}>
-            <Group justify="space-between" mb="lg">
-                <Box>
-                    <Title order={2} style={{ color: 'var(--text)' }}>Lab Topology</Title>
-                    <Text c="dimmed" size="sm">Design and visualize your infrastructure topology</Text>
-                </Box>
-            </Group>
+        <ReactFlowProvider>
+            <Box style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)' }}>
+                <Group justify="space-between" mb="lg">
+                    <Box>
+                        <Title order={2} style={{ color: 'var(--text)' }}>Lab Topology</Title>
+                        <Text c="dimmed" size="sm">Design and visualize your infrastructure topology</Text>
+                    </Box>
+                </Group>
 
-            <Box style={{ display: 'flex', flex: 1, gap: 'md', position: 'relative' }}>
-                <LoadingOverlay visible={nodesQ.isLoading && !activeNode} />
-
-                <TopologySidebar
-                    resources={allResources}
-                    loading={isLoading}
-                />
-
-                <Box
-                    style={{
-                        flex: 1,
-                        border: '1px dashed var(--border)',
-                        borderRadius: '12px',
-                        background: 'rgba(0,0,0,0.1)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center'
-                    }}
-                >
-                    <Text c="dimmed">React Flow Canvas will be initialized here in Step 3</Text>
-                </Box>
+                <LabCanvas allResources={allResources} isLoading={isLoading} />
             </Box>
-        </Box>
+        </ReactFlowProvider>
     );
 }
