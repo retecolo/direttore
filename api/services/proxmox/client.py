@@ -125,25 +125,8 @@ MOCK_STORAGE: dict[str, list[dict[str, Any]]] = {
 }
 
 
-def check_status() -> dict[str, Any]:
-    """Check Proxmox connectivity or report mock status."""
+def get_nodes() -> list[dict[str, Any]]:
     if settings.proxmox_mock:
-        return {
-            "status": "mocked",
-            "host": settings.proxmox_host,
-            "nodes_count": len(MOCK_NODES),
-        }
-    try:
-        px = get_client()
-        nodes = px.nodes.get()
-        return {
-            "status": "online",
-            "host": settings.proxmox_host,
-            "nodes_count": len(nodes),
-        }
-    except Exception as e:
-        return {
-            "status": "offline",
-            "host": settings.proxmox_host,
-            "error": str(e),
-        }
+        return MOCK_NODES
+    px = get_client()
+    return px.nodes.get()
