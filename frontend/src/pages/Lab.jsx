@@ -1,6 +1,7 @@
-import { useState, useMemo, useCallback, useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { Box, Group, Title, Text, LoadingOverlay } from '@mantine/core';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Box, Group, Title, Text, LoadingOverlay, Badge, Loader, ActionIcon } from '@mantine/core';
+import { IconCheck } from '@tabler/icons-react';
 import {
     ReactFlow,
     ReactFlowProvider,
@@ -27,6 +28,7 @@ const selectionStyles = `
 `;
 
 import { getNodes, getVMs, getContainers } from '../api/proxmox';
+import { getTopologies, getTopology, saveTopology } from '../api/topology';
 import TopologySidebar from '../features/topology/components/TopologySidebar';
 import ResourceNode from '../features/topology/components/nodes/ResourceNode';
 
@@ -38,7 +40,96 @@ const nodeTypes = {
 function LabCanvas({ allResources, isLoading }) {
     const [nodes, setNodes] = useState([]);
     const [edges, setEdges] = useState([]);
-    const { screenToFlowPosition } = useReactFlow();
+    const { screenToFlowPosition, fitView } = useReactFlow();
+    const queryClient = useQueryClient();
+    const [isSaving, setIsSaving] = useState(false);
+    const saveTimerRef = useRef(null);
+
+    // 1. Load existing topology
+    const { data: topologyData, isLoading: isTopoLoading } = useQuery({
+        queryKey: ['topology'],
+        queryFn: async () => {
+            const list = await getTopologies();
+            if (list.length > 0) {
+                return getTopology(list[0].id);
+            }
+            return null;
+        }
+    });
+
+    // Initialize nodes/edges from DB
+    useEffect(() => {
+        if (topologyData) {
+            const mappedNodes = topologyData.nodes.map(n => ({
+                id: n.id,
+                type: n.type,
+                position: { x: n.pos_x, y: n.pos_y },
+                data: n.data
+            }));
+            const mappedEdges = topologyData.edges.map(e => ({
+                id: e.id,
+                source: e.source,
+                target: e.target,
+                sourceHandle: e.source_handle,
+                targetHandle: e.target_handle,
+                data: e.data,
+                style: { stroke: '#ffffff', strokeWidth: 1.5 },
+                interactionWidth: 20
+            }));
+            setNodes(mappedNodes);
+            setEdges(mappedEdges);
+            // Slight delay to allow nodes to render before fitting
+            setTimeout(() => fitView({ padding: 0.2 }), 100);
+        }
+    }, [topologyData, fitView]);
+
+    // 2. Save Mutation
+    const mutation = useMutation({
+        mutationFn: saveTopology,
+        onSuccess: () => {
+            setIsSaving(false);
+            queryClient.invalidateQueries({ queryKey: ['topology'] });
+        },
+        onError: () => setIsSaving(false)
+    });
+
+    // 3. Auto-save trigger
+    useEffect(() => {
+        // Only start auto-saving after initial load
+        if (isTopoLoading) return;
+
+        // Skip if everything is empty and we don't have a record yet
+        if (nodes.length === 0 && !topologyData?.id) return;
+
+        setIsSaving(true);
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+
+        saveTimerRef.current = setTimeout(() => {
+            const payload = {
+                name: topologyData?.name || "Default Lab",
+                nodes: nodes.map(n => ({
+                    id: n.id,
+                    pos_x: n.position.x,
+                    pos_y: n.position.y,
+                    data: n.data,
+                    type: n.type
+                })),
+                edges: edges.map(e => ({
+                    id: e.id,
+                    source: e.source,
+                    target: e.target,
+                    source_handle: e.sourceHandle,
+                    target_handle: e.targetHandle,
+                    data: e.data
+                }))
+            };
+            mutation.mutate(payload);
+        }, 1500); // 1.5s debounce
+
+        return () => {
+            if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+        };
+    }, [nodes, edges, isTopoLoading]);
 
     const onNodesChange = useCallback(
         (changes) => setNodes((nds) => applyNodeChanges(changes, nds)),
@@ -107,8 +198,24 @@ function LabCanvas({ allResources, isLoading }) {
         [screenToFlowPosition, nodes]
     );
 
+    const saveStatus = (
+        <Group gap="6px">
+            {isSaving ? (
+                <>
+                    <Loader size="8px" color="cyan" />
+                    <Text size="10px" c="cyan" fw={500} lts="0.3px">SYNCING...</Text>
+                </>
+            ) : (
+                <>
+                    <IconCheck size={12} color="var(--mantine-color-green-6)" />
+                    <Text size="10px" c="dimmed" fw={500} lts="0.3px">SYNCED</Text>
+                </>
+            )}
+        </Group>
+    );
+
     return (
-        <Box style={{ display: 'flex', flex: 1, gap: 'md', position: 'relative' }}>
+        <Box style={{ display: 'flex', flex: 1, gap: 'md', position: 'relative', minHeight: 0 }}>
             <TopologySidebar
                 resources={allResources}
                 loading={isLoading}
@@ -117,6 +224,8 @@ function LabCanvas({ allResources, isLoading }) {
             <Box
                 style={{
                     flex: 1,
+                    display: 'flex',
+                    flexDirection: 'column',
                     border: '1px solid var(--border)',
                     borderRadius: '12px',
                     background: 'rgba(0,0,0,0.2)',
@@ -124,6 +233,18 @@ function LabCanvas({ allResources, isLoading }) {
                     position: 'relative'
                 }}
             >
+                <Box
+                    style={{
+                        position: 'absolute',
+                        top: 10,
+                        right: 10,
+                        zIndex: 10,
+                        pointerEvents: 'none'
+                    }}
+                >
+                    {saveStatus}
+                </Box>
+
                 <ReactFlow
                     nodes={nodes}
                     edges={edges}
