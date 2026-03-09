@@ -81,7 +81,7 @@ export default function Layout({ children }) {
 
                 {/* Footer */}
                 <Box mt="auto" px="lg" pt="lg">
-                    <Text size="xs" c="dimmed">v0.1.0 • mock mode</Text>
+                    <Text size="xs" c="dimmed">v0.1.0</Text>
                 </Box>
             </Box>
 

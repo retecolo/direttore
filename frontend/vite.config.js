@@ -5,21 +5,27 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    // Allow requests from nginx reverse proxy (any hostname).
-    // Vite's default host check blocks non-localhost Host headers.
+    // Bind to all interfaces so the dev server is reachable at the host's
+    // real IP (e.g. http://100.x.x.x:5173) without needing the --host CLI flag.
+    // allowedHosts: 'all' suppresses Vite's host-header check so nginx or
+    // any external proxy can forward requests without getting a 403.
     allowedHosts: 'all',
-    // Bind exclusively to the IPv6 localhost so internal traffic routes through nginx
-    host: '::1',
-    // Proxy /api/* to the FastAPI backend when running Vite directly
-    // (i.e. http://host:5173). Not needed when accessed through nginx.
+    host: '0.0.0.0',
+
+    // Proxy /api/* (and docs) to the FastAPI backend.
+    //
+    // IMPORTANT: use 127.0.0.1, NOT localhost.
+    // On many Linux hosts, 'localhost' resolves to ::1 (IPv6) but uvicorn
+    // launched with --host 0.0.0.0 only listens on IPv4 interfaces, so the
+    // proxy connection will be refused and API calls will fail with 502/ECONNREFUSED.
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
-      '/docs': { target: 'http://localhost:8000', changeOrigin: true },
-      '/redoc': { target: 'http://localhost:8000', changeOrigin: true },
-      '/openapi.json': { target: 'http://localhost:8000', changeOrigin: true },
+      '/docs':         { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      '/redoc':        { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      '/openapi.json': { target: 'http://127.0.0.1:8000', changeOrigin: true },
     },
   },
 })

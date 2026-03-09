@@ -15,10 +15,17 @@ logging.basicConfig(
 # Show our own ERROR logs even when uvicorn is set to WARNING
 logging.getLogger("api").setLevel(logging.DEBUG)
 
+log = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    log.info(
+        "Direttore API ready | mock=%s | cors_origins=%s",
+        settings.proxmox_mock,
+        settings.cors_origins,
+    )
     yield
 
 
@@ -45,3 +52,20 @@ app.include_router(inventory.router)
 @app.get("/healthz")
 def health() -> dict:
     return {"status": "ok", "mock_mode": settings.proxmox_mock}
+
+
+@app.get("/api")
+@app.get("/api/")
+def api_root() -> dict:
+    """Return a summary of available API route groups."""
+    return {
+        "status": "ok",
+        "routes": {
+            "proxmox": "/api/proxmox/nodes",
+            "reservations": "/api/reservations/",
+            "inventory": "/api/inventory/netbox-status",
+            "docs": "/docs",
+            "health": "/healthz",
+        },
+    }
+
