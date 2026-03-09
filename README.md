@@ -7,17 +7,20 @@ A vendor-agnostic network and compute lab automation platform combining **NetBox
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   React Frontend (Vite)                 │
-│   Dashboard · Resources · Provision Wizard · Calendar   │
-└──────────────────┬────────────────────────────┬─────────┘
-                   │ REST API                   │
-┌──────────────────▼────────────────────────────▼─────────┐
-│                  FastAPI Backend (api/)                  │
-├─────────────┬────────────────┬──────────────────────────┤
-│  Proxmox    │  Reservations  │      NetBox Proxy        │
-│  (proxmoxer)│  (SQLAlchemy)  │      (httpx)             │
-└─────────────┴────────────────┴──────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                      React Frontend (Vite 7)                    │
+│  Dashboard · Resources · Provision Wizard · Lab Topology ·      │
+│  Reservation Calendar                                           │
+└──────────────────┬──────────────────────────────┬──────────────┘
+                   │ REST API                      │
+┌──────────────────▼──────────────────────────────▼──────────────┐
+│                    FastAPI Backend (api/)                       │
+├──────────────┬───────────────┬────────────────┬────────────────┤
+│  Proxmox     │  Reservations │   NetBox Proxy │  /healthz      │
+│  (proxmoxer) │  (SQLAlchemy) │   (httpx)      │                │
+│  services/   │  models.py    │   services/    │                │
+│  proxmox/    │               │   netbox/      │                │
+└──────────────┴───────────────┴────────────────┴────────────────┘
         │                                      │
   Proxmox VE API                         NetBox API
   (QEMU VMs + LXC)                  (Device inventory)
@@ -34,14 +37,15 @@ A vendor-agnostic network and compute lab automation platform combining **NetBox
 Real-time cluster overview — one card per Proxmox node showing CPU, RAM, and disk utilization with auto-refresh every 30 seconds.
 
 ### Resources
-Browse all VMs and LXC containers across nodes. Start, stop, and delete resources directly from the table.
+Browse all VMs and LXC containers across nodes. Start, stop, and delete resources directly from the table. Click any resource row for a detailed modal view.
 
 ### Provision Wizard
-6-step wizard to provision a new VM or LXC container:
+7-step wizard to provision a new VM or LXC container:
 1. **Type** — choose VM (QEMU/KVM) or LXC Container, select target node
 2. **Template** — select ISO or container template from node storage
-3. **Resources** — set name, VMID, CPU cores, RAM, disk size
-4. **Network & Storage** — configure storage pool and network interfaces:
+3. **User** — set username, password, and optional SSH public key
+4. **Resources** — set name, VMID, CPU cores, RAM, disk size
+5. **Network & Storage** — configure storage pool and network interfaces:
    - **Storage**: select from available Proxmox storage pools (shows type and free space)
    - **NICs**: add up to 8 network interfaces per VM/LXC — each with:
      - Bridge selection (live list from the node's configured bridges)
@@ -53,8 +57,16 @@ Browse all VMs and LXC containers across nodes. Start, stop, and delete resource
        - Automatically allocates the next available IP address from a selected Prefix.
        - Smart IPv6 handling (avoids network addresses like `::` and `.0`).
        - Auto-detects explicit default gateways from NetBox records, or gracefully assumes `.1` / `::1` as gateways when absent.
-5. **Review** — confirm all settings including per-NIC summary table
-6. **Progress** — live task progress bar polling the Proxmox UPID
+6. **Review** — confirm all settings including per-NIC summary table
+7. **Progress** — live task progress bar polling the Proxmox UPID
+
+### Lab Topology
+Interactive drag-and-drop canvas (powered by **React Flow / @xyflow/react**) for visualizing and designing your infrastructure topology:
+- Drag VMs and LXC containers from the sidebar onto the canvas
+- Draw connections between resources to document network relationships
+- Snap-to-grid layout with dark-mode dot background
+- Node selection highlights with cyan glow; edge selection with stroke emphasis
+- Prevents duplicate resources from being placed on the canvas
 
 ### Reservation Calendar
 FullCalendar week/month/day view. Click any time slot to reserve a resource window. Conflict detection prevents double-booking the same node.
@@ -69,7 +81,7 @@ FullCalendar week/month/day view. Click any time slot to reserve a resource wind
 ### Resource Browser
 ![Resources — VM table with status and action buttons](docs/screenshots/resources.png)
 
-### Provision Wizard (Step 3 — Resources)
+### Provision Wizard (Step 4 — Resources)
 ![Provision wizard showing resource configuration step](docs/screenshots/provision.png)
 
 ### Reservation Calendar
@@ -79,21 +91,21 @@ FullCalendar week/month/day view. Click any time slot to reserve a resource wind
 
 ## Prerequisites
 
-- Python 3.11+ (backend)
-- Node.js 20+ (frontend)
+- **Python 3.13+** (backend)
+- **[uv](https://docs.astral.sh/uv/)** — fast Python package manager (replaces pip/venv)
+- **Node.js 20+** (frontend)
 - A Proxmox VE host, **or** use `PROXMOX_MOCK=true` for development without hardware
-- NetBox instance (optional — only needed for the inventory proxy routes)
+- NetBox instance (optional — only needed for the inventory proxy routes and NetBox NIC picker)
 
 ---
 
 ## Installation & Setup
 
-### 1. Clone and branch
+### 1. Clone the repository
 
 ```bash
 git clone <repo-url>
 cd direttore
-git checkout feature/react-fastapi-frontend
 ```
 
 ### 2. Configure environment
@@ -106,16 +118,28 @@ cp .env.example .env
 
 ### 3. Backend setup
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-api.txt
+The backend is managed with [`uv`](https://docs.astral.sh/uv/). Install it if you don't have it:
 
-# Start the API server on the IPv6 loopback
-PROXMOX_MOCK=true uvicorn api.main:app --host ::1 --reload --port 8000
+```bash
+# Install uv (macOS / Linux)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-API docs available at **http://localhost:8000/docs**
+Then install and run:
+
+```bash
+# Install all dependencies from pyproject.toml + uv.lock
+uv sync
+
+# Start the API server (IPv6 loopback; adjust host as needed)
+PROXMOX_MOCK=true uv run uvicorn api.main:app --host ::1 --reload --port 8000
+
+# Or on IPv4 / all interfaces:
+PROXMOX_MOCK=true uv run uvicorn api.main:app --host 0.0.0.0 --reload --port 8000
+```
+
+API docs available at **http://localhost:8000/docs** (Swagger) and **http://localhost:8000/redoc** (ReDoc).
+Health check: **http://localhost:8000/healthz**
 
 ### 4. Frontend setup
 
@@ -125,7 +149,18 @@ npm install
 npm run dev
 ```
 
-Frontend available at **http://localhost:5173**
+Frontend available at **http://[::1]:5173** (or **http://localhost:5173**).
+
+> **Note:** Vite is configured to bind to `::1` (IPv6 loopback). If your system doesn't have IPv6 loopback, change `host: '::1'` to `host: '0.0.0.0'` in `frontend/vite.config.js`.
+
+The Vite dev server also proxies the following paths directly to the FastAPI backend (no nginx required during development):
+
+| Vite proxy path | Backend |
+|---|---|
+| `/api/*` | `http://localhost:8000` |
+| `/docs` | `http://localhost:8000` |
+| `/redoc` | `http://localhost:8000` |
+| `/openapi.json` | `http://localhost:8000` |
 
 ---
 
@@ -141,7 +176,7 @@ Frontend available at **http://localhost:5173**
 | `NETBOX_URL` | `http://localhost:8000` | NetBox base URL |
 | `NETBOX_TOKEN` | — | NetBox API token |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./direttore.db` | SQLAlchemy async DB URL |
-| `API_CORS_ORIGINS` | `http://localhost:5173,...` | Comma-separated allowed CORS origins |
+| `API_CORS_ORIGINS` | `http://localhost:5173,http://localhost:3000` | Comma-separated allowed CORS origins |
 
 ---
 
@@ -174,6 +209,9 @@ Frontend available at **http://localhost:5173**
   "disk": "32G",
   "storage": "local-lvm",
   "iso": "local:iso/ubuntu-22.04.4-live-server-amd64.iso",
+  "username": "labuser",
+  "password": "changeme",
+  "ssh_key": "ssh-ed25519 AAAA...",
   "nics": [
     { "bridge": "vmbr0", "model": "virtio", "vlan": null },
     { "bridge": "vmbr1", "model": "e1000", "vlan": 100, "ip": "10.0.0.5/24", "gw": "10.0.0.1", "ip6": "2001:db8::5/64", "dns": "1.1.1.1 8.8.8.8" }
@@ -192,11 +230,13 @@ Frontend available at **http://localhost:5173**
   "storage": "local-lvm",
   "disk_size": 8,
   "template": "local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.gz",
+  "username": "labuser",
+  "password": "changeme",
+  "ssh_key": "ssh-ed25519 AAAA...",
   "nics": [
     { "name": "eth0", "bridge": "vmbr0", "ip": "dhcp", "ip6": "auto", "vlan": null },
     { "name": "eth1", "bridge": "vmbr1", "ip": "10.10.100.5/24", "gw": "10.10.100.1", "ip6": "2001:db8::100:5/64", "gw6": "2001:db8::100:1", "dns": "1.1.1.1 2606:4700:4700::1111", "vlan": 200 }
   ],
-  "password": "changeme",
   "unprivileged": true,
   "start_after_create": true
 }
@@ -223,6 +263,12 @@ Frontend available at **http://localhost:5173**
 | `GET` | `/api/inventory/prefixes` | IP prefixes with gateway and DNS hints |
 | `GET` | `/api/inventory/vlans` | VLANs list |
 
+### Health
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/healthz` | Returns `{"status":"ok","mock_mode":<bool>}` |
+
 ---
 
 ## nginx Reverse Proxy
@@ -245,7 +291,7 @@ Example configs live in [`docs/nginx/`](docs/nginx/):
 Vite's HMR WebSocket is served on the same port as the dev server and is handled transparently via the `$connection_upgrade` map — no separate path needed.
 
 > [!IMPORTANT]
-> **Vite host check** — Vite's dev server rejects any request whose `Host` header isn't `localhost`/`127.0.0.1`. When nginx proxies from a real hostname (e.g. `netserv.example.com`), Vite returns an *"Invalid Host header"* error. The `vite.config.js` in this repo already sets `allowedHosts: 'all'` and `host: '0.0.0.0'` to fix this. If you see a blank page or that error, make sure the Vite dev server was **restarted** after the config change.
+> **Vite host check** — Vite's dev server rejects any request whose `Host` header isn't `localhost`/`127.0.0.1`. When nginx proxies from a real hostname (e.g. `netserv.example.com`), Vite returns an *"Invalid Host header"* error. The `vite.config.js` in this repo already sets `allowedHosts: 'all'` and `host: '::1'` to fix this. If you see a blank page or that error, make sure the Vite dev server was **restarted** after the config change.
 
 ### Install (bare-metal)
 
@@ -287,15 +333,56 @@ sudo systemctl status direttore-api
 
 ---
 
-## Docker Compose (Local Dev)
+## Docker Compose
+
+### Quick-start (production-like)
 
 ```bash
-cp .env.example .env   # set PROXMOX_MOCK=true
+cp .env.example .env   # set PROXMOX_MOCK=true if no real Proxmox
 docker compose up
 ```
 
 - API: **http://localhost:8000**
 - Frontend: **http://localhost:5173**
+
+### Full Dev Stack (`docker-compose.dev.yml`)
+
+The dev compose file brings up the complete local environment including a Proxmox container, NetBox, PostgreSQL, and Redis:
+
+```bash
+docker compose -f docker-compose.dev.yml up
+```
+
+| Service | Port | Description |
+|---|---|---|
+| `api` | 8000 | FastAPI backend (hot-reload via volume mount) |
+| `frontend` | 5173 | Vite dev server (hot-reload via volume mount) |
+| `proxmox` | 8006 | Proxmox VE 8 container (`rtedpro/proxmox:8.4.1-arm64`) |
+| `netbox` | 8080 | NetBox v3.7 (admin/superuserpassword) |
+| `postgres` | — | PostgreSQL 15 for NetBox |
+| `redis` | — | Redis 7 for NetBox |
+
+#### Initialize the Proxmox dev container
+
+After the dev stack is up, run the included setup script to configure the Proxmox container with templates, ISOs, and network bridges:
+
+```bash
+bash api/scripts/init_proxmox_node.sh
+```
+
+This script:
+- Sets the root password to `root`
+- Updates the LXC appliance template list
+- Downloads Ubuntu 22.04 and Debian 12 LXC templates
+- Stubs out Rocky 9 and Ubuntu 22.04 ISO files
+- Creates `vmbr0` and `vmbr1` network bridges
+- Regenerates SSL certificates (fixes `pveproxy` startup errors)
+
+#### Seed test data
+
+```bash
+bash api/scripts/seed_test_resources.sh
+```
 
 ---
 
@@ -303,44 +390,66 @@ docker compose up
 
 ```
 direttore/
-├── api/                      # FastAPI backend
-│   ├── main.py               # App entrypoint, CORS, lifespan
-│   ├── config.py             # Pydantic-settings from .env
-│   ├── db.py                 # Async SQLAlchemy engine
-│   ├── models.py             # Reservation, ResourcePool ORM models
-│   ├── proxmox/
-│   │   ├── client.py         # proxmoxer wrapper + mock data (nodes, VMs, LXC, networks, storage)
-│   │   ├── vms.py            # QEMU VM CRUD
-│   │   ├── containers.py     # LXC container CRUD
-│   │   ├── templates.py      # ISO/template listing
-│   │   ├── network.py        # Bridge interface listing
-│   │   └── storage.py        # Storage pool listing
-│   └── routes/
-│       ├── proxmox.py        # /api/proxmox/* routes (incl. /networks, /storage)
-│       ├── reservations.py   # /api/reservations/* routes
-│       └── inventory.py      # /api/inventory/* routes
-├── frontend/                 # React + Vite SPA
+├── api/                          # FastAPI backend
+│   ├── main.py                   # App entrypoint, CORS, lifespan
+│   ├── config.py                 # Pydantic-settings from .env
+│   ├── db.py                     # Async SQLAlchemy engine
+│   ├── models.py                 # Reservation, ResourcePool ORM models
+│   ├── schemas/                  # Pydantic request/response schemas
+│   │   ├── proxmox.py
+│   │   ├── reservations.py
+│   │   └── inventory.py
+│   ├── services/                 # Business logic / external integrations
+│   │   ├── proxmox/
+│   │   │   ├── client.py         # proxmoxer wrapper + mock data
+│   │   │   ├── vms.py            # QEMU VM CRUD
+│   │   │   ├── containers.py     # LXC container CRUD
+│   │   │   ├── templates.py      # ISO/template listing
+│   │   │   ├── network.py        # Bridge interface listing
+│   │   │   └── storage.py        # Storage pool listing
+│   │   └── netbox/               # NetBox API client
+│   ├── routes/                   # FastAPI routers
+│   │   ├── proxmox.py            # /api/proxmox/* routes
+│   │   ├── reservations.py       # /api/reservations/* routes
+│   │   └── inventory.py          # /api/inventory/* routes
+│   └── scripts/                  # Dev / ops helper scripts
+│       ├── init_proxmox_node.sh  # Bootstrap Proxmox Docker container
+│       └── seed_test_resources.sh
+├── frontend/                     # React + Vite SPA
 │   ├── src/
-│   │   ├── api/              # Axios client + typed API functions
+│   │   ├── api/                  # Axios client + typed API functions
 │   │   ├── components/
-│   │   │   └── Layout.jsx    # Sidebar navigation
+│   │   │   ├── Layout.jsx        # Sidebar navigation
+│   │   │   └── NetBoxNicPicker.jsx  # NetBox IPAM modal
+│   │   ├── features/
+│   │   │   ├── provisioning/     # Wizard steps, hooks, utils
+│   │   │   │   ├── ProvisioningFeature.jsx
+│   │   │   │   ├── components/   # TypeStep, TemplateStep, UserStep, ...
+│   │   │   │   ├── hooks/        # useProvisioningData, useProvisioningForm
+│   │   │   │   └── utils/        # formatters
+│   │   │   └── topology/         # Lab Topology canvas
+│   │   │       └── components/   # TopologySidebar, ResourceNode, ...
 │   │   └── pages/
 │   │       ├── Dashboard.jsx     # Node cards + resource bars
 │   │       ├── Resources.jsx     # VM/CT table with actions
-│   │       ├── Provision.jsx     # 5-step provisioning wizard
+│   │       ├── Provision.jsx     # Provision wizard wrapper
+│   │       ├── Lab.jsx           # React Flow topology canvas
 │   │       └── Reservations.jsx  # FullCalendar + booking modal
+│   ├── vite.config.js
 │   └── Dockerfile.frontend
-├── templates/                # Jinja2 network config templates
+├── templates/                    # Jinja2 network config templates
 │   ├── junos/, arista/, panos/, nokia-sros/, mikrotik/
-│   └── html/                 # Legacy Flask template (superseded)
-├── nornir-examples/          # Nornir task examples
-├── inventory.py              # Nornir + NetBox inventory plugin
-├── deploy.py                 # Git-backed config deployment
-├── scheduler.py              # Legacy iCAL scheduler (superseded by API)
-├── requirements-api.txt      # Backend Python dependencies
-├── Dockerfile.api            # Backend Docker image
-├── docker-compose.yml        # Full-stack local dev
-└── .env.example              # Environment variable template
+│   └── html/                     # Legacy Flask template (superseded)
+├── nornir-examples/              # Nornir task examples
+├── inventory.py                  # Nornir + NetBox inventory plugin
+├── deploy.py                     # Git-backed config deployment
+├── scheduler.py                  # Legacy iCAL scheduler (superseded by API)
+├── pyproject.toml                # Python project metadata + dependencies (uv)
+├── uv.lock                       # Locked dependency tree
+├── Dockerfile.api                # Backend Docker image
+├── docker-compose.yml            # Quick-start full-stack compose
+├── docker-compose.dev.yml        # Full dev stack (Proxmox + NetBox + Postgres + Redis)
+└── .env.example                  # Environment variable template
 ```
 
 ---
@@ -390,23 +499,22 @@ In addition to virtual infrastructure, Direttore manages physical networking har
 For the detailed, step-by-step implementation plan (including directory structures, Junos examples, and Netmiko platform mapping), please read the **[Network Automation Implementation Plan](docs/network_automation_plan.md)**.
 
 ```bash
-source .venv/bin/activate
 # Example: Deploy provisioned VLANs to all Active Juniper switches
-python nornir_automation/generate_and_push.py
+uv run python nornir_automation/generate_and_push.py
 ```
 
 ---
 
 ## Roadmap
 
-| Feature | Effort |
-|---|---|
-| RBAC / Auth (Auth0 or local) | 10 hrs |
-| Real-time VM console (xterm.js + WebSocket) | 15 hrs |
-| Snapshot management UI | 5 hrs |
-| Prometheus metrics endpoint | 8 hrs |
-| Two-way iCAL sync (CalDAV) | 8 hrs |
-| YANG config validation | 5 hrs |
+| Feature | Status | Effort |
+|---|---|---|
+| JWT Authentication (local users) | ✅ Done | — |
+| Real-time VM console (xterm.js + WebSocket) | Planned | 15 hrs |
+| Snapshot management UI | Planned | 5 hrs |
+| Prometheus metrics endpoint | Planned | 8 hrs |
+| Two-way iCAL sync (CalDAV) | Planned | 8 hrs |
+| YANG config validation | Planned | 5 hrs |
 
 ---
 
