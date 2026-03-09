@@ -95,5 +95,7 @@ class CreateLXCRequest(BaseModel):
     template: str                   # e.g. "local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.gz"
     nics: list[LXCNICConfig] = Field(default_factory=lambda: [LXCNICConfig()])
     password: str = "changeme"
+    username: str | None = None     # default user inside the container
+    ssh_key: str | None = None      # public key (injected via cloud-init if supported)
     unprivileged: bool = True
     start_after_create: bool = True

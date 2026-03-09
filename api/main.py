@@ -1,4 +1,5 @@
 """Direttore FastAPI application entry point."""
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,6 +7,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.config import settings
 from api.db import init_db
 from api.routes import proxmox, reservations, inventory
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s: %(message)s",
+)
+# Show our own ERROR logs even when uvicorn is set to WARNING
+logging.getLogger("api").setLevel(logging.DEBUG)
 
 
 @asynccontextmanager
