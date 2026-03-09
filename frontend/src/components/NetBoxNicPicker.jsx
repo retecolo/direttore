@@ -316,23 +316,44 @@ export default function NetBoxNicPicker({ opened, onClose, onApply, nicIndex }) 
     const statusQ = useNetBoxStatus();
     const reachable = statusQ.data?.reachable;
 
+    const [applied, setApplied] = useState(null); // tracks last-applied description for feedback
+
     const handleSelect = ({ type, data }) => {
+        let patch = {};
+
         if (type === 'ip') {
-            const isV6 = (data.family === 6);
-            onApply(isV6
-                ? { ip6: data.address, gw6: data.prefix_gateway || '', dns: data.dns_name || '' }
-                : { ip: data.address, gw: data.prefix_gateway || '', dns: data.dns_name || '' }
-            );
+            // data.family is an integer (4 or 6) from slim_ip()
+            const isV6 = Number(data.family) === 6;
+            // data.address is a full CIDR like "10.1.2.3/24" or "2001:db8::1/64"
+            // data.prefix_gateway comes from longest-prefix match against all prefixes
+            // NOTE: data.dns_name is a FQDN hostname (e.g. "host.example.com"), NOT a
+            // nameserver IP. Don't populate the DNS field from it.
+            if (isV6) {
+                patch = { ip6: data.address, gw6: data.prefix_gateway || '' };
+            } else {
+                patch = { ip: data.address, gw: data.prefix_gateway || '' };
+            }
+            setApplied(data.address);
         } else if (type === 'prefix') {
-            const isV6 = (data.family === 6);
-            onApply(isV6
-                ? { ip6: 'auto', gw6: data.gateway || '', dns: data.dns_servers || '' }
-                : { ip: 'dhcp', gw: data.gateway || '', dns: data.dns_servers || '' }
-            );
+            const isV6 = Number(data.family) === 6;
+            // For prefixes, dns_servers contains actual nameserver IPs (space-separated)
+            if (isV6) {
+                patch = { ip6: 'auto', gw6: data.gateway || '', dns: data.dns_servers || '' };
+            } else {
+                patch = { ip: 'dhcp', gw: data.gateway || '', dns: data.dns_servers || '' };
+            }
+            setApplied(data.prefix);
         } else if (type === 'vlan') {
-            onApply({ vlan: data.vid });
+            patch = { vlan: data.vid };
+            setApplied(`VLAN ${data.vid} — ${data.name}`);
         }
-        onClose();
+
+        onApply(patch);
+        // Brief delay so user sees the "Applied!" feedback before modal closes
+        setTimeout(() => {
+            setApplied(null);
+            onClose();
+        }, 600);
     };
 
     return (
@@ -354,6 +375,11 @@ export default function NetBoxNicPicker({ opened, onClose, onApply, nicIndex }) 
                             variant="dot"
                         >
                             {reachable ? statusQ.data.version : 'unreachable'}
+                        </Badge>
+                    )}
+                    {applied && (
+                        <Badge size="xs" color="teal" variant="filled" leftSection={<IconCheck size={9} />}>
+                            Applied: {applied}
                         </Badge>
                     )}
                 </Group>

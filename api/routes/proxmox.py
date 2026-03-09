@@ -212,12 +212,11 @@ def create_container(node: str, req: CreateLXCRequest) -> dict[str, Any]:
         "unprivileged": 1 if req.unprivileged else 0,
         "start": 1 if req.start_after_create else 0,
     }
-    # Optional user / SSH-key setup
-    if req.username:
-        params["ciuser"] = req.username
-    if req.ssh_key:
-        params["sshkeys"] = req.ssh_key
-
+    # NOTE: ciuser / sshkeys are cloud-init parameters for QEMU VMs only.
+    # LXC containers do NOT support them — Proxmox returns 400 if sent.
+    # The 'password' param above sets the root password for LXC directly.
+    # req.username and req.ssh_key are accepted by the schema for future use
+    # (e.g. post-create user setup) but are intentionally not forwarded here.
     # Attach all NICs (net0, net1, …) and collect DNS
     dns_servers: list[str] = []
     for idx, nic in enumerate(req.nics):
