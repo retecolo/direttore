@@ -8,6 +8,7 @@ import Resources from './pages/Resources';
 import Provision from './pages/Provision';
 import Reservations from './pages/Reservations';
 import Lab from './pages/Lab';
+import Hardware from './pages/Hardware';
 
 import '@mantine/core/styles.css';
 import '@mantine/dates/styles.css';
@@ -36,6 +37,7 @@ export default function App() {
               <Route path="/resources" element={<Resources />} />
               <Route path="/provision" element={<Provision />} />
               <Route path="/lab" element={<Lab />} />
+              <Route path="/hardware" element={<Hardware />} />
               <Route path="/reservations" element={<Reservations />} />
             </Routes>
           </Layout>

@@ -7,14 +7,16 @@ import {
     IconRocket,
     IconCalendar,
     IconFlask,
+    IconCpu,
 } from '@tabler/icons-react';
 import { useEffect } from 'react';
 
 const NAV = [
-    { to: '/dashboard', label: 'Dashboard', icon: IconLayoutDashboard },
-    { to: '/resources', label: 'Resources', icon: IconServer },
-    { to: '/provision', label: 'Provision', icon: IconRocket },
-    { to: '/lab', label: 'Lab', icon: IconFlask },
+    { to: '/dashboard',  label: 'Dashboard',  icon: IconLayoutDashboard },
+    { to: '/resources',  label: 'Resources',  icon: IconServer },
+    { to: '/provision',  label: 'Provision',  icon: IconRocket },
+    { to: '/hardware',   label: 'Hardware',   icon: IconCpu },
+    { to: '/lab',        label: 'Lab',        icon: IconFlask },
     { to: '/reservations', label: 'Reservations', icon: IconCalendar },
 ];
 

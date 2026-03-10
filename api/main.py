@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.config import settings
 from api.db import init_db
-from api.routes import proxmox, reservations, inventory
+from api.routes import proxmox, reservations, inventory, hardware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +47,7 @@ app.add_middleware(
 app.include_router(proxmox.router)
 app.include_router(reservations.router)
 app.include_router(inventory.router)
+app.include_router(hardware.router)
 
 
 @app.get("/healthz")
@@ -61,11 +62,12 @@ def api_root() -> dict:
     return {
         "status": "ok",
         "routes": {
-            "proxmox": "/api/proxmox/nodes",
+            "proxmox":      "/api/proxmox/nodes",
             "reservations": "/api/reservations/",
-            "inventory": "/api/inventory/netbox-status",
-            "docs": "/docs",
-            "health": "/healthz",
+            "inventory":    "/api/inventory/netbox-status",
+            "hardware":     "/api/hardware/devices",
+            "docs":         "/docs",
+            "health":       "/healthz",
         },
     }
 
