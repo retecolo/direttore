@@ -304,6 +304,8 @@ export default function ProvisioningFeature() {
                 onClose={() => setPickerNic(null)}
                 onApply={(patch) => applyNetBoxPick(pickerNic, patch)}
                 nicIndex={pickerNic ?? 0}
+                hostname={form.values.name}
+                resourceType={type}
             />
         </Box>
     );

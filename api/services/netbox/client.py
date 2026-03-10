@@ -224,7 +224,7 @@ async def fetch_prefixes(params: dict[str, Any]) -> list[dict[str, Any]]:
 
 async def fetch_vlans(params: dict[str, Any]) -> list[dict[str, Any]]:
     """Fetch VLANs from NetBox, transformed to slim representation."""
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
         r = await client.get(
             f"{settings.netbox_url}/api/ipam/vlans/",
             params=params,
@@ -232,3 +232,150 @@ async def fetch_vlans(params: dict[str, Any]) -> list[dict[str, Any]]:
         )
         r.raise_for_status()
         return [slim_vlan(v) for v in r.json().get("results", [])]
+
+
+async def fetch_prefix(prefix_id: int) -> dict[str, Any]:
+    """Fetch a single NetBox prefix by ID."""
+    async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
+        r = await client.get(
+            f"{settings.netbox_url}/api/ipam/prefixes/{prefix_id}/",
+            headers=_nb_headers(),
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+async def _ip_exists(client: httpx.AsyncClient, address: str) -> dict[str, Any] | None:
+    """
+    Return the NetBox IP address object if it already exists, else None.
+    `address` should be a full CIDR, e.g. '10.1.2.1/24' or '2001:db8::1/64'.
+    """
+    r = await client.get(
+        f"{settings.netbox_url}/api/ipam/ip-addresses/",
+        params={"address": address},
+        headers=_nb_headers(),
+    )
+    r.raise_for_status()
+    results = r.json().get("results", [])
+    return results[0] if results else None
+
+
+async def _create_ip(
+    client: httpx.AsyncClient,
+    address: str,
+    status: str = "active",
+    dns_name: str = "",
+    description: str = "",
+) -> dict[str, Any]:
+    """Create a new IP address in NetBox and return the created object."""
+    payload: dict[str, Any] = {
+        "address": address,
+        "status": status,
+    }
+    if dns_name:
+        payload["dns_name"] = dns_name
+    if description:
+        payload["description"] = description
+    r = await client.post(
+        f"{settings.netbox_url}/api/ipam/ip-addresses/",
+        json=payload,
+        headers={**_nb_headers(), "Content-Type": "application/json"},
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+async def check_or_reserve_gateway(
+    prefix_str: str,
+    prefix_len: int,
+    family: int,
+) -> str:
+    """
+    Ensure the conventional gateway address for a prefix is reserved in NetBox.
+
+    IPv4: x.x.x.1 / <prefix_len>
+    IPv6: <prefix>::1 / <prefix_len>  (also reserves :: as the network address)
+
+    Returns the gateway address as a bare IP string (no CIDR).
+    """
+    import ipaddress as _ip
+
+    if family == 4:
+        net = _ip.ip_network(prefix_str, strict=False)
+        # Skip network address (.0) — gateway is .1
+        gw_ip = str(net.network_address + 1)
+        gw_cidr = f"{gw_ip}/{prefix_len}"
+        reserves = [(gw_cidr, "Gateway")]
+    else:
+        net = _ip.ip_network(prefix_str, strict=False)
+        net_addr = str(net.network_address)          # ::
+        gw_ip = str(net.network_address + 1)         # ::1
+        net_cidr = f"{net_addr}/{prefix_len}"
+        gw_cidr = f"{gw_ip}/{prefix_len}"
+        reserves = [
+            (net_cidr, "Network address (reserved)"),
+            (gw_cidr,  "Gateway"),
+        ]
+
+    async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
+        for cidr, desc in reserves:
+            existing = await _ip_exists(client, cidr)
+            if not existing:
+                await _create_ip(client, cidr, status="reserved", description=desc)
+
+    return gw_ip
+
+
+async def allocate_next_ip(
+    prefix_id: int,
+    prefix_str: str,
+    prefix_len: int,
+    family: int,
+    hostname: str,
+    resource_type: str,   # 'lxc' | 'vm'
+) -> dict[str, Any]:
+    """
+    Allocate the next available IP in a NetBox prefix.
+
+    Flow:
+      1. Idempotently reserve gateway (.1 / ::1) and IPv6 network (::)
+      2. Ask NetBox for the next available IP (POST prefixes/{id}/available-ips/)
+         — NetBox automatically skips already-allocated addresses
+      3. Return: { address, gateway, family, netbox_ip_id }
+
+    The status of the created IP is:
+      - 'active'   for LXC containers (being provisioned right now)
+      - 'reserved' for VMs (will be configured later)
+    """
+    # Step 1 — ensure gateway/network addresses are reserved
+    gateway_ip = await check_or_reserve_gateway(prefix_str, prefix_len, family)
+
+    # Step 2 — allocate next available via NetBox built-in endpoint
+    status = "active" if resource_type == "lxc" else "reserved"
+    payload: dict[str, Any] = {
+        "status": status,
+        "dns_name": hostname,
+        "description": f"Allocated by Direttore for {resource_type} '{hostname}'",
+    }
+
+    async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
+        r = await client.post(
+            f"{settings.netbox_url}/api/ipam/prefixes/{prefix_id}/available-ips/",
+            json=payload,
+            headers={**_nb_headers(), "Content-Type": "application/json"},
+        )
+        if r.status_code == 204:
+            raise ValueError(f"No available IPs left in prefix {prefix_str}")
+        r.raise_for_status()
+        created = r.json()
+
+    allocated_addr = created.get("address", "")   # e.g. '10.1.2.5/24'
+    bare_ip = allocated_addr.split("/")[0]
+
+    return {
+        "address": allocated_addr,
+        "bare_ip": bare_ip,
+        "gateway": gateway_ip,
+        "family": family,
+        "netbox_ip_id": created.get("id"),
+    }
