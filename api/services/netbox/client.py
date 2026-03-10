@@ -3,6 +3,7 @@
 
 import asyncio
 import ipaddress
+import logging
 from typing import Any
 
 import httpx
@@ -10,6 +11,7 @@ import httpx
 from api.config import settings
 
 TIMEOUT = 10
+log = logging.getLogger(__name__)
 
 
 def _nb_headers() -> dict[str, str]:
@@ -347,9 +349,21 @@ async def check_or_reserve_gateway(
 
     async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
         for cidr, desc in reserves:
-            existing = await _ip_exists(client, cidr)
-            if not existing:
-                await _create_ip(client, cidr, status="reserved", description=desc)
+            try:
+                existing = await _ip_exists(client, cidr)
+                if not existing:
+                    await _create_ip(client, cidr, status="reserved", description=desc)
+                    log.info("NetBox: reserved %s as %s", cidr, desc)
+                else:
+                    log.debug("NetBox: %s already exists (%s) — skipping", cidr, desc)
+            except Exception as exc:
+                # Don't abort the whole loop — log and move on.
+                # Common cause: NetBox rejects network/broadcast addresses as
+                # invalid host IPs. The GATEWAY entry must still be reserved.
+                log.warning(
+                    "NetBox: could not reserve %s (%s): %s — continuing to next address",
+                    cidr, desc, exc,
+                )
 
     return gw_ip
 
