@@ -27,21 +27,31 @@ router = APIRouter(prefix="/api/hardware", tags=["hardware"])
 # Helpers — NetBox device enrichment
 # ---------------------------------------------------------------------------
 
+def _extract_ip(obj: dict | str | None) -> str | None:
+    """Pull a bare IP string from a NetBox IP address object or plain string."""
+    if not obj:
+        return None
+    addr = obj.get("address", "") if isinstance(obj, dict) else str(obj)
+    return addr.split("/")[0] if addr else None
+
+
 def _mgmt_ip_from_device(device: dict[str, Any]) -> str | None:
     """
-    Extract the best management IP from a NetBox device object.
-    Priority: primary_ip4 > primary_ip > primary_ip6
+    Return the preferred management IP for a device.
+    Priority: IPv6 (primary_ip6) → IPv4 (primary_ip4) → primary_ip (family unknown)
     """
-    for key in ("primary_ip4", "primary_ip", "primary_ip6"):
-        obj = device.get(key)
-        if obj:
-            addr = obj.get("address", "") if isinstance(obj, dict) else str(obj)
-            if addr:
-                return addr.split("/")[0]   # strip CIDR mask
-    return None
+    return (
+        _extract_ip(device.get("primary_ip6"))
+        or _extract_ip(device.get("primary_ip4"))
+        or _extract_ip(device.get("primary_ip"))
+    )
 
 
 def _slim_device(d: dict[str, Any]) -> dict[str, Any]:
+    mgmt_ip4 = _extract_ip(d.get("primary_ip4"))
+    mgmt_ip6 = _extract_ip(d.get("primary_ip6"))
+    # preferred = IPv6 first, IPv4 fallback, then whatever primary_ip is
+    primary   = mgmt_ip6 or mgmt_ip4 or _extract_ip(d.get("primary_ip"))
     return {
         "id":          d.get("id"),
         "name":        d.get("name") or "",
@@ -51,7 +61,9 @@ def _slim_device(d: dict[str, Any]) -> dict[str, Any]:
         "site":        (d.get("site") or {}).get("name", ""),
         "rack":        (d.get("rack") or {}).get("display", ""),
         "role":        (d.get("device_role") or d.get("role") or {}).get("name", ""),
-        "primary_ip":  _mgmt_ip_from_device(d),
+        "primary_ip":  primary,      # preferred for Unimus lookup and display
+        "mgmt_ip4":    mgmt_ip4,     # explicit IPv4 (may be None)
+        "mgmt_ip6":    mgmt_ip6,     # explicit IPv6 (may be None)
         "tags":        [t.get("name", "") for t in (d.get("tags") or [])],
         "custom_fields": d.get("custom_fields") or {},
     }

@@ -178,14 +178,40 @@ function DeviceDrawer({ deviceId, opened, onClose }) {
                                 ['Site',         device.site],
                                 ['Rack',         device.rack],
                                 ['Role',         device.role],
-                                ['Mgmt IP',      device.primary_ip],
                                 ['Status',       device.status],
                             ].map(([label, val]) => val ? (
                                 <Group key={label} justify="space-between">
                                     <Text size="xs" c="dimmed">{label}</Text>
-                                    <Text size="xs" fw={500} ff={label === 'Mgmt IP' ? 'monospace' : undefined}>{val}</Text>
+                                    <Text size="xs" fw={500}>{val}</Text>
                                 </Group>
                             ) : null)}
+
+                            {/* Management IPs — show both families */}
+                            {(device.mgmt_ip6 || device.mgmt_ip4 || device.primary_ip) && (
+                                <Box>
+                                    <Text size="xs" c="dimmed" mb={4}>Management IP</Text>
+                                    <Stack gap={4}>
+                                        {device.mgmt_ip6 && (
+                                            <Group gap="xs">
+                                                <Badge size="xs" color="cyan" variant="light">IPv6</Badge>
+                                                <Text size="xs" ff="monospace">{device.mgmt_ip6}</Text>
+                                            </Group>
+                                        )}
+                                        {device.mgmt_ip4 && (
+                                            <Group gap="xs">
+                                                <Badge size="xs" color="teal" variant="light">IPv4</Badge>
+                                                <Text size="xs" ff="monospace" c={device.mgmt_ip6 ? 'dimmed' : undefined}>{device.mgmt_ip4}</Text>
+                                            </Group>
+                                        )}
+                                        {!device.mgmt_ip4 && !device.mgmt_ip6 && device.primary_ip && (
+                                            <Group gap="xs">
+                                                <Badge size="xs" color="gray" variant="light">primary</Badge>
+                                                <Text size="xs" ff="monospace">{device.primary_ip}</Text>
+                                            </Group>
+                                        )}
+                                    </Stack>
+                                </Box>
+                            )}
 
                             {device.tags?.length > 0 && (
                                 <Group gap="xs" mt="xs">
@@ -611,8 +637,30 @@ export default function Hardware() {
                                     <Table.Td c="dimmed">{d.site || '—'}</Table.Td>
                                     <Table.Td c="dimmed">{d.role || '—'}</Table.Td>
                                     <Table.Td ff="monospace" fw={500}>
-                                        {d.primary_ip
-                                            ? <Group gap={4}><IconWifi size={11} color="var(--mantine-color-cyan-5)" />{d.primary_ip}</Group>
+                                        {d.mgmt_ip6 || d.mgmt_ip4 || d.primary_ip
+                                            ? (
+                                                <Stack gap={2}>
+                                                    {d.mgmt_ip6 && (
+                                                        <Group gap={4} wrap="nowrap">
+                                                            <Badge size="xs" color="cyan" variant="dot" radius="sm">v6</Badge>
+                                                            <Text fz="xs" ff="monospace">{d.mgmt_ip6}</Text>
+                                                        </Group>
+                                                    )}
+                                                    {d.mgmt_ip4 && (
+                                                        <Group gap={4} wrap="nowrap">
+                                                            <Badge size="xs" color="teal" variant="dot" radius="sm">v4</Badge>
+                                                            <Text fz="xs" ff="monospace" c={d.mgmt_ip6 ? 'dimmed' : undefined}>{d.mgmt_ip4}</Text>
+                                                        </Group>
+                                                    )}
+                                                    {/* primary_ip fallback when NetBox has no v4/v6 split */}
+                                                    {!d.mgmt_ip4 && !d.mgmt_ip6 && d.primary_ip && (
+                                                        <Group gap={4}>
+                                                            <IconWifi size={11} color="var(--mantine-color-cyan-5)" />
+                                                            <Text fz="xs" ff="monospace">{d.primary_ip}</Text>
+                                                        </Group>
+                                                    )}
+                                                </Stack>
+                                            )
                                             : <Text fz="xs" c="red.5">No mgmt IP</Text>
                                         }
                                     </Table.Td>
