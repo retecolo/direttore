@@ -291,30 +291,58 @@ async def check_or_reserve_gateway(
     family: int,
 ) -> str:
     """
-    Ensure the conventional gateway address for a prefix is reserved in NetBox.
+    Idempotently reserve the conventional infrastructure addresses for a prefix
+    in NetBox, then return the gateway IP as a bare string (no CIDR mask).
 
-    IPv4: x.x.x.1 / <prefix_len>
-    IPv6: <prefix>::1 / <prefix_len>  (also reserves :: as the network address)
+    IPv4 reservations (all with status='reserved'):
+      /1 – /30  →  NETWORK (.0), GATEWAY (.1), BROADCAST (last address)
+      /31       →  NETWORK (first), GATEWAY (second)   [RFC 3021 — no broadcast]
+      /32       →  nothing reserved (single-host block)
 
-    Returns the gateway address as a bare IP string (no CIDR).
+    IPv6 reservations:
+      NETWORK (prefix::)    — the network/anycast address
+      GATEWAY (prefix::1)   — conventional first-hop address
+      (No broadcast in IPv6)
     """
     import ipaddress as _ip
 
+    net = _ip.ip_network(prefix_str, strict=False)
+    reserves: list[tuple[str, str]] = []
+
     if family == 4:
-        net = _ip.ip_network(prefix_str, strict=False)
-        # Skip network address (.0) — gateway is .1
-        gw_ip = str(net.network_address + 1)
-        gw_cidr = f"{gw_ip}/{prefix_len}"
-        reserves = [(gw_cidr, "Gateway")]
+        if prefix_len <= 30:
+            # Standard prefix — reserve network, gateway, and broadcast
+            net_cidr   = f"{net.network_address}/{prefix_len}"
+            gw_ip      = str(net.network_address + 1)
+            gw_cidr    = f"{gw_ip}/{prefix_len}"
+            bcast_cidr = f"{net.broadcast_address}/{prefix_len}"
+            reserves = [
+                (net_cidr,   "NETWORK"),
+                (gw_cidr,    "GATEWAY"),
+                (bcast_cidr, "BROADCAST"),
+            ]
+        elif prefix_len == 31:
+            # RFC 3021 point-to-point — two usable hosts, no broadcast
+            net_cidr = f"{net.network_address}/{prefix_len}"
+            gw_ip    = str(net.network_address + 1)
+            gw_cidr  = f"{gw_ip}/{prefix_len}"
+            reserves = [
+                (net_cidr,  "NETWORK"),
+                (gw_cidr,   "GATEWAY"),
+            ]
+        else:
+            # /32 — single host, gateway is the host itself, nothing to pre-reserve
+            gw_ip = str(net.network_address)
+
+        if prefix_len <= 31:
+            gw_ip = str(net.network_address + 1)
     else:
-        net = _ip.ip_network(prefix_str, strict=False)
-        net_addr = str(net.network_address)          # ::
-        gw_ip = str(net.network_address + 1)         # ::1
-        net_cidr = f"{net_addr}/{prefix_len}"
-        gw_cidr = f"{gw_ip}/{prefix_len}"
+        # IPv6 — reserve network (::) and gateway (::1); no broadcast
+        net_addr = str(net.network_address)      # e.g. 2001:db8::
+        gw_ip    = str(net.network_address + 1)  # e.g. 2001:db8::1
         reserves = [
-            (net_cidr, "Network address (reserved)"),
-            (gw_cidr,  "Gateway"),
+            (f"{net_addr}/{prefix_len}", "NETWORK"),
+            (f"{gw_ip}/{prefix_len}",    "GATEWAY"),
         ]
 
     async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
