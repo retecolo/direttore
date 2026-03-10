@@ -283,8 +283,48 @@ async def _create_ip(
         json=payload,
         headers={**_nb_headers(), "Content-Type": "application/json"},
     )
-    r.raise_for_status()
+    if not r.is_success:
+        # Capture the full response body so the WARNING log is useful
+        try:
+            body = r.json()
+        except Exception:
+            body = r.text
+        log.warning("NetBox rejected IP creation for %s: %s %s", address, r.status_code, body)
+        r.raise_for_status()  # still raises the HTTPStatusError
     return r.json()
+
+
+def _forbidden_ips(prefix_str: str, family: int) -> set[str]:
+    """
+    Return the set of bare IP strings that must never be assigned to a host
+    for the given prefix.  These are the addresses we try to pre-reserve
+    in NetBox, but this set is used as a definitive guard even when
+    pre-reservation fails.
+
+    IPv4: network (.0), gateway (.1), broadcast (last)
+    IPv6: network (::), gateway (::1)
+    """
+    net = ipaddress.ip_network(prefix_str, strict=False)
+    if family == 4:
+        plen = net.prefixlen
+        if plen <= 30:
+            return {
+                str(net.network_address),
+                str(net.network_address + 1),
+                str(net.broadcast_address),
+            }
+        elif plen == 31:
+            return {
+                str(net.network_address),
+                str(net.network_address + 1),
+            }
+        else:  # /32
+            return set()
+    else:
+        return {
+            str(net.network_address),        # ::
+            str(net.network_address + 1),    # ::1
+        }
 
 
 async def check_or_reserve_gateway(
@@ -380,42 +420,82 @@ async def allocate_next_ip(
     Allocate the next available IP in a NetBox prefix.
 
     Flow:
-      1. Idempotently reserve gateway (.1 / ::1) and IPv6 network (::)
-      2. Ask NetBox for the next available IP (POST prefixes/{id}/available-ips/)
-         — NetBox automatically skips already-allocated addresses
-      3. Return: { address, gateway, family, netbox_ip_id }
+      1. Idempotently reserve gateway/network/broadcast addresses in NetBox
+         (best-effort — failures are logged and skipped, not fatal).
+      2. Ask NetBox for the next available IP via available-ips.
+      3. Safety check: if NetBox hands back a forbidden address (network,
+         gateway, or broadcast) — because pre-reservation failed or NetBox
+         didn’t honour it — patch that IP to ‘reserved’ and request again.
+         Retry up to MAX_ALLOCATION_TRIES times.
 
     The status of the created IP is:
       - 'active'   for LXC containers (being provisioned right now)
       - 'reserved' for VMs (will be configured later)
     """
-    # Step 1 — ensure gateway/network addresses are reserved
-    gateway_ip = await check_or_reserve_gateway(prefix_str, prefix_len, family)
+    MAX_TRIES = 8
 
-    # Step 2 — allocate next available via NetBox built-in endpoint
+    # Step 1 — best-effort reservation of infrastructure addresses
+    gateway_ip = await check_or_reserve_gateway(prefix_str, prefix_len, family)
+    forbidden  = _forbidden_ips(prefix_str, family)
+
+    # Step 2 — allocate with post-allocation safety loop
     status = "active" if resource_type == "lxc" else "reserved"
     payload: dict[str, Any] = {
         "status": status,
         "dns_name": hostname,
         "description": f"Allocated by Direttore for {resource_type} '{hostname}'",
     }
+    alloc_headers = {**_nb_headers(), "Content-Type": "application/json"}
 
     async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
-        r = await client.post(
-            f"{settings.netbox_url}/api/ipam/prefixes/{prefix_id}/available-ips/",
-            json=payload,
-            headers={**_nb_headers(), "Content-Type": "application/json"},
-        )
-        if r.status_code == 204:
-            raise ValueError(f"No available IPs left in prefix {prefix_str}")
-        r.raise_for_status()
-        created = r.json()
+        for attempt in range(1, MAX_TRIES + 1):
+            r = await client.post(
+                f"{settings.netbox_url}/api/ipam/prefixes/{prefix_id}/available-ips/",
+                json=payload,
+                headers=alloc_headers,
+            )
+            if r.status_code == 204:
+                raise ValueError(f"No available IPs left in prefix {prefix_str}")
+            r.raise_for_status()
+            created      = r.json()
+            alloc_addr   = created.get("address", "")   # e.g. "fd68::.../64"
+            bare_ip      = alloc_addr.split("/")[0]
 
-    allocated_addr = created.get("address", "")   # e.g. '10.1.2.5/24'
-    bare_ip = allocated_addr.split("/")[0]
+            if bare_ip not in forbidden:
+                # Good — this is a real host address
+                log.info(
+                    "NetBox: allocated %s for %s '%s' (attempt %d)",
+                    alloc_addr, resource_type, hostname, attempt,
+                )
+                break
+
+            # Forbidden address handed back — mark it reserved and retry
+            ip_id = created.get("id")
+            desc_map = {
+                str(ipaddress.ip_network(prefix_str, strict=False).network_address): "NETWORK",
+                str(ipaddress.ip_network(prefix_str, strict=False).network_address + 1): "GATEWAY",
+                str(ipaddress.ip_network(prefix_str, strict=False).broadcast_address): "BROADCAST",
+            }
+            infra_desc = desc_map.get(bare_ip, "INFRASTRUCTURE (reserved)")
+            log.warning(
+                "NetBox returned forbidden address %s (%s) on attempt %d — "
+                "patching to reserved and retrying",
+                alloc_addr, infra_desc, attempt,
+            )
+            if ip_id:
+                await client.patch(
+                    f"{settings.netbox_url}/api/ipam/ip-addresses/{ip_id}/",
+                    json={"status": "reserved", "description": infra_desc},
+                    headers=alloc_headers,
+                )
+        else:
+            raise ValueError(
+                f"Could not allocate a non-infrastructure IP from {prefix_str} "
+                f"after {MAX_TRIES} attempts. Check that the prefix has free addresses."
+            )
 
     return {
-        "address": allocated_addr,
+        "address": alloc_addr,
         "bare_ip": bare_ip,
         "gateway": gateway_ip,
         "family": family,
