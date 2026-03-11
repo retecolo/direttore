@@ -42,6 +42,33 @@ def _fmt_error(r: httpx.Response) -> str:
     return f"HTTP {r.status_code} from {r.url}: {body}"
 
 
+def _unwrap(body: dict[str, Any]) -> Any:
+    """
+    Normalise Unimus API response shapes.
+
+    Older Unimus versions / some endpoints wrap the payload:
+        { "data": <payload> }
+    Newer versions (confirmed from live API) return the payload directly:
+        { "content": [...], "paginator": {...} }   (for list endpoints)
+        { "id": ..., ... }                          (for single-object endpoints)
+
+    Returns the unwrapped payload dict/list.
+    """
+    if "data" in body:
+        return body["data"]
+    return body
+
+
+def _unwrap_list(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """Unwrap and extract the 'content' array from a paginated Unimus response."""
+    inner = _unwrap(body)
+    if isinstance(inner, list):
+        return inner
+    if isinstance(inner, dict):
+        return inner.get("content", [])
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Health / status
 # ---------------------------------------------------------------------------
@@ -50,9 +77,8 @@ async def check_status() -> dict[str, Any]:
     """
     Return reachability info for the configured Unimus instance.
 
-    Tries GET /api/v2/devices?size=1 as the probe — this is a real API
-    endpoint present in all Unimus v2 versions, so it's more reliable than
-    hitting /api/v2/ which may redirect or return HTML.
+    Uses GET /api/v2/devices?size=1 as the probe — the root /api/v2/ returns
+    404 in many Unimus versions, so a real API endpoint is more reliable.
     """
     if not settings.unimus_url or not settings.unimus_token:
         return {
@@ -70,63 +96,37 @@ async def check_status() -> dict[str, Any]:
         log.debug("Unimus probe response: %s", r.status_code)
 
         if r.status_code == 401:
-            return {
-                "reachable": False,
-                "reason":    "Authentication failed (401) — check UNIMUS_TOKEN",
-                "url":       settings.unimus_url,
-                "http_status": 401,
-            }
+            return {"reachable": False, "reason": "Authentication failed (401) — check UNIMUS_TOKEN",
+                    "url": settings.unimus_url, "http_status": 401}
         if r.status_code == 403:
-            return {
-                "reachable": False,
-                "reason":    "Forbidden (403) — token may lack API permissions",
-                "url":       settings.unimus_url,
-                "http_status": 403,
-            }
+            return {"reachable": False, "reason": "Forbidden (403) — token may lack API permissions",
+                    "url": settings.unimus_url, "http_status": 403}
         if not r.is_success:
-            return {
-                "reachable":   False,
-                "reason":      _fmt_error(r),
-                "url":         settings.unimus_url,
-                "http_status": r.status_code,
-            }
+            return {"reachable": False, "reason": _fmt_error(r),
+                    "url": settings.unimus_url, "http_status": r.status_code}
 
-        # Parse version from response if available
-        data = {}
-        try:
-            data = r.json()
-        except Exception:
-            pass
+        body = r.json()
+        inner = _unwrap(body)
+        total = (inner.get("paginator") or inner.get("totalCount") or {})
+        if isinstance(total, dict):
+            total = total.get("totalCount", "?")
 
-        version = (
-            data.get("version")
-            or (data.get("data") or {}).get("version")
-            or "connected"
-        )
         return {
-            "reachable": True,
-            "version":   version,
-            "url":       settings.unimus_url,
+            "reachable":    True,
+            "device_count": total,
+            "url":          settings.unimus_url,
         }
 
     except httpx.ConnectError as exc:
-        return {
-            "reachable": False,
-            "reason":    f"Connection refused / unreachable: {exc}",
-            "url":       settings.unimus_url,
-        }
+        return {"reachable": False, "reason": f"Connection refused / unreachable: {exc}",
+                "url": settings.unimus_url}
     except httpx.TimeoutException:
-        return {
-            "reachable": False,
-            "reason":    f"Connection timed out after 10s — is {settings.unimus_url} reachable from the server?",
-            "url":       settings.unimus_url,
-        }
+        return {"reachable": False,
+                "reason": f"Timed out after 10s — is {settings.unimus_url} reachable?",
+                "url": settings.unimus_url}
     except Exception as exc:
-        return {
-            "reachable": False,
-            "reason":    f"{type(exc).__name__}: {exc}",
-            "url":       settings.unimus_url,
-        }
+        return {"reachable": False, "reason": f"{type(exc).__name__}: {exc}",
+                "url": settings.unimus_url}
 
 
 # ---------------------------------------------------------------------------
@@ -142,19 +142,18 @@ async def list_devices(page: int = 0, size: int = 500) -> list[dict[str, Any]]:
             headers=_headers(),
         )
         r.raise_for_status()
-        return r.json().get("data", {}).get("content", [])
+        return _unwrap_list(r.json())
 
 
 async def find_device_by_address(address: str) -> dict[str, Any] | None:
     """
     Find a Unimus device by its management IP address.
 
-    Tries GET /api/v2/devices/findByAddress?address=x (query param form)
-    first, then falls back to POST with JSON body if that returns 405/404,
-    to handle differences between Unimus versions.
+    Tries GET with query param first (newer Unimus), then POST with JSON body
+    (older spec), to handle version differences.
     """
     async with httpx.AsyncClient(timeout=TIMEOUT, verify=VERIFY) as client:
-        # Attempt 1: GET with query param (common in newer Unimus builds)
+        # Attempt 1: GET with query param
         r = await client.get(
             f"{_base()}/api/v2/devices/findByAddress",
             params={"address": address},
@@ -163,7 +162,7 @@ async def find_device_by_address(address: str) -> dict[str, Any] | None:
         log.debug("findByAddress GET %s → %s", address, r.status_code)
 
         if r.status_code == 405:
-            # Attempt 2: POST with JSON body (older Unimus API spec)
+            # Attempt 2: POST with JSON body
             r = await client.post(
                 f"{_base()}/api/v2/devices/findByAddress",
                 json={"address": address},
@@ -177,11 +176,14 @@ async def find_device_by_address(address: str) -> dict[str, Any] | None:
             log.warning("findByAddress error: %s", _fmt_error(r))
             return None
 
-        data = r.json().get("data")
-        # May return a list or a single object depending on version
-        if isinstance(data, list):
-            return data[0] if data else None
-        return data
+        payload = _unwrap(r.json())
+        # May be a single object, a list, or wrapped
+        if isinstance(payload, list):
+            return payload[0] if payload else None
+        if isinstance(payload, dict) and "content" in payload:
+            items = payload["content"]
+            return items[0] if items else None
+        return payload if isinstance(payload, dict) and payload else None
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +199,7 @@ async def list_backups(device_id: str, limit: int = 20) -> list[dict[str, Any]]:
             headers=_headers(),
         )
         r.raise_for_status()
-        return r.json().get("data", {}).get("content", [])
+        return _unwrap_list(r.json())
 
 
 async def get_latest_backup(device_id: str) -> dict[str, Any] | None:
@@ -210,7 +212,9 @@ async def get_latest_backup(device_id: str) -> dict[str, Any] | None:
         if r.status_code == 404:
             return None
         r.raise_for_status()
-        backup = r.json().get("data", {})
+        backup = _unwrap(r.json())
+        if not isinstance(backup, dict):
+            return None
         return _decode_backup(backup)
 
 
@@ -224,7 +228,10 @@ async def get_backup_by_id(device_id: str, backup_id: str) -> dict[str, Any] | N
         if r.status_code == 404:
             return None
         r.raise_for_status()
-        return _decode_backup(r.json().get("data", {}))
+        backup = _unwrap(r.json())
+        if not isinstance(backup, dict):
+            return None
+        return _decode_backup(backup)
 
 
 def _decode_backup(backup: dict[str, Any]) -> dict[str, Any]:
@@ -245,11 +252,7 @@ def _decode_backup(backup: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def trigger_backup(device_ids: list[str]) -> dict[str, Any]:
-    """
-    Trigger a backup job for one or more Unimus-managed devices.
-
-    Returns the job object: { jobId, status, ... }
-    """
+    """Trigger a backup job for one or more Unimus-managed devices."""
     async with httpx.AsyncClient(timeout=TIMEOUT, verify=VERIFY) as client:
         r = await client.post(
             f"{_base()}/api/v2/jobs/backupDevices",
@@ -259,7 +262,7 @@ async def trigger_backup(device_ids: list[str]) -> dict[str, Any]:
         if not r.is_success:
             log.warning("trigger_backup error: %s", _fmt_error(r))
         r.raise_for_status()
-        return r.json().get("data", {})
+        return _unwrap(r.json()) or {}
 
 
 async def poll_job(job_id: str) -> dict[str, Any]:
@@ -270,7 +273,7 @@ async def poll_job(job_id: str) -> dict[str, Any]:
             headers=_headers(),
         )
         r.raise_for_status()
-        return r.json().get("data", {})
+        return _unwrap(r.json()) or {}
 
 
 # ---------------------------------------------------------------------------
@@ -278,12 +281,7 @@ async def poll_job(job_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def push_config(device_id: str, config_text: str, note: str = "") -> dict[str, Any]:
-    """
-    Push a configuration to a device via Unimus Pro.
-
-    The config text is base64-encoded and submitted as a scheduled job.
-    Returns the job object for polling.
-    """
+    """Push a configuration to a device via Unimus Pro."""
     encoded = base64.b64encode(config_text.encode("utf-8")).decode("ascii")
     payload: dict[str, Any] = {
         "deviceIds":     [device_id],
@@ -299,7 +297,7 @@ async def push_config(device_id: str, config_text: str, note: str = "") -> dict[
         if not r.is_success:
             log.warning("push_config error: %s", _fmt_error(r))
         r.raise_for_status()
-        return r.json().get("data", {})
+        return _unwrap(r.json()) or {}
 
 
 # ---------------------------------------------------------------------------
@@ -307,42 +305,31 @@ async def push_config(device_id: str, config_text: str, note: str = "") -> dict[
 # ---------------------------------------------------------------------------
 
 async def raw_probe() -> dict[str, Any]:
-    """
-    Probe multiple Unimus endpoints and return raw results for debugging.
-    Useful when diagnosing connectivity or auth problems.
-    """
+    """Probe multiple Unimus endpoints and return raw results for debugging."""
     if not settings.unimus_url:
         return {"error": "UNIMUS_URL not configured"}
 
     results: dict[str, Any] = {
-        "base_url": _base(),
-        "token_set": bool(settings.unimus_token),
-        "token_prefix": settings.unimus_token[:6] + "…" if settings.unimus_token else "(empty)",
-        "probes": {},
+        "base_url":    _base(),
+        "token_set":   bool(settings.unimus_token),
+        "token_prefix": settings.unimus_token[:6] + "\u2026" if settings.unimus_token else "(empty)",
+        "probes":      {},
     }
 
     probes = [
-        ("GET /api/v2/devices?size=1", "GET",  f"{_base()}/api/v2/devices", {"size": 1}),
-        ("GET /api/v2/",              "GET",  f"{_base()}/api/v2/",          {}),
+        ("GET /api/v2/devices?size=1", "GET", f"{_base()}/api/v2/devices", {"size": 1}),
+        ("GET /api/v2/",              "GET", f"{_base()}/api/v2/",         {}),
     ]
 
     async with httpx.AsyncClient(timeout=10, verify=VERIFY) as client:
         for label, method, url, params in probes:
             try:
-                if method == "GET":
-                    r = await client.get(url, params=params, headers=_headers())
-                else:
-                    r = await client.post(url, headers=_headers())
-
+                r = await client.get(url, params=params, headers=_headers())
                 try:
                     body = r.json()
                 except Exception:
                     body = r.text[:300]
-
-                results["probes"][label] = {
-                    "status":   r.status_code,
-                    "body":     body,
-                }
+                results["probes"][label] = {"status": r.status_code, "body": body}
             except Exception as exc:
                 results["probes"][label] = {"error": f"{type(exc).__name__}: {exc}"}
 
