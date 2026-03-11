@@ -1,32 +1,32 @@
 # Direttore — Lab Infrastructure Management Platform
 
-A vendor-agnostic network and compute lab automation platform combining **NetBox** inventory, **Nornir** network device configuration, and a modern **React + FastAPI** web interface for provisioning and reserving Proxmox VMs and LXC containers.
+A vendor-agnostic network and compute lab automation platform combining **NetBox** inventory, **Nornir** network device configuration, and a modern **React + FastAPI** web interface for provisioning and reserving Proxmox VMs and LXC containers — and managing physical network hardware via **Unimus Pro** and **Git**.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      React Frontend (Vite 7)                    │
-│  Dashboard · Resources · Provision Wizard · Lab Topology ·      │
-│  Reservation Calendar                                           │
-└──────────────────┬──────────────────────────────┬──────────────┘
-                   │ REST API                      │
-┌──────────────────▼──────────────────────────────▼──────────────┐
-│                    FastAPI Backend (api/)                       │
-├──────────────┬───────────────┬────────────────┬────────────────┤
-│  Proxmox     │  Reservations │   NetBox Proxy │  /healthz      │
-│  (proxmoxer) │  (SQLAlchemy) │   (httpx)      │                │
-│  services/   │  models.py    │   services/    │                │
-│  proxmox/    │               │   netbox/      │                │
-└──────────────┴───────────────┴────────────────┴────────────────┘
-        │                                      │
-  Proxmox VE API                         NetBox API
-  (QEMU VMs + LXC)                  (Device inventory)
-
-                    + Nornir pipeline (existing)
-                    + Git-backed config storage (existing)
+┌─────────────────────────────────────────────────────────────────────┐
+│                       React Frontend (Vite 7)                       │
+│  Dashboard · Resources · Provision Wizard · Hardware · Lab ·        │
+│  Reservation Calendar                                               │
+└──────────────┬──────────────────────────────────────┬──────────────┘
+               │ REST API                              │
+┌──────────────▼──────────────────────────────────────▼──────────────┐
+│                     FastAPI Backend (api/)                          │
+├──────────────┬───────────────┬────────────────┬─────────────────────┤
+│  Proxmox     │  Reservations │  NetBox Proxy  │  Hardware Mgmt      │
+│  (proxmoxer) │  (SQLAlchemy) │  (httpx)       │  (Unimus Pro + Git) │
+│  services/   │  models.py    │  services/     │  services/unimus/   │
+│  proxmox/    │               │  netbox/       │  services/git_cfg/  │
+└──────────────┴───────────────┴────────────────┴─────────────────────┘
+        │                          │                      │
+  Proxmox VE API             NetBox API            Unimus Pro API
+  (QEMU VMs + LXC)       (Device inventory)      (Config backup/push)
+                                                         │
+                                                  Git HTTPS + PAT
+                                               (Config archive repo)
 ```
 
 ---
@@ -70,6 +70,35 @@ Interactive drag-and-drop canvas (powered by **React Flow / @xyflow/react**) for
 
 ### Reservation Calendar
 FullCalendar week/month/day view. Click any time slot to reserve a resource window. Conflict detection prevents double-booking the same node.
+
+### Hardware Management
+Manage physical network devices (routers, switches, firewalls) that are registered in NetBox. Devices are discovered automatically from NetBox DCIM, and the page provides:
+
+- **Device table** — searchable/filterable by name, type, IP, or site; shows both IPv6 and IPv4 management IPs (IPv6 preferred when available) with colour-coded family badges
+- **Per-device drawer** with four tabs:
+  - **Overview** — NetBox device details: type, manufacturer, site, rack, role, all management IPs, interface table with mgmt-only indicators
+  - **Backup** — trigger a real-time backup via Unimus Pro; selectively archive to Unimus, Git, or both; shows git commit SHA and a config preview after completion
+  - **Config History** — browsable git log per device; click any commit to view the full config at that point in time with one-click copy
+  - **Provision** — push a "golden config" to the live device via Unimus Pro; choose source of truth (Git or Unimus latest backup); Git source lets you pick any historical commit
+- **Status badges** (header) — real-time reachability indicators for Unimus (shows device count) and Git repo (shows configured branch)
+- **Integration warnings** — actionable alerts when `UNIMUS_URL` or `GIT_CONFIG_REPO` are not configured
+
+#### Unimus connectivity notes
+
+Unimus is contacted from the **server running Direttore**, not from your browser. Common issues:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ConnectError: All connection attempts failed` | DNS doesn't resolve from server, or wrong hostname | Use the bare IP address in `UNIMUS_URL` (e.g. `https://10.x.x.x`) |
+| Same error with IPv6 host | Must use bracket notation | `UNIMUS_URL=https://[2001:db8::10]` |
+| HTTP 401 | Wrong or expired API token | Re-generate in Unimus → Settings → Security → API access tokens |
+| HTTP 403 | Token lacks API permission | Enable "API Access" scope for the token |
+| Devices found but backup returns "not found in Unimus" | Unimus stores devices by **hostname**, not IP | Ensure the address in Unimus matches what NetBox has in `primary_ip` |
+
+Use the built-in debug endpoint to diagnose from the server:
+```bash
+curl -s http://127.0.0.1:8000/api/hardware/debug-unimus | python3 -m json.tool
+```
 
 ---
 
@@ -177,6 +206,14 @@ The Vite dev server also proxies the following paths directly to the FastAPI bac
 | `NETBOX_TOKEN` | — | NetBox API token |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./direttore.db` | SQLAlchemy async DB URL |
 | `API_CORS_ORIGINS` | `http://localhost:5173,http://localhost:3000` | Comma-separated allowed CORS origins |
+| **`UNIMUS_URL`** | — | Unimus base URL — e.g. `https://unimus.example.com` or `https://[2001:db8::10]` for IPv6 hosts |
+| **`UNIMUS_TOKEN`** | — | Unimus API Bearer token (Settings → Security → API access tokens) |
+| **`GIT_CONFIG_REPO`** | — | HTTPS clone URL of the config archive repo (e.g. `https://github.com/org/configs.git`) |
+| **`GIT_CONFIG_BRANCH`** | `main` | Branch to commit device configs to |
+| **`GIT_CONFIG_AUTH_TOKEN`** | — | Personal Access Token for HTTPS Git auth (needs repo read+write scope) |
+| **`GIT_CONFIG_LOCAL_PATH`** | `/opt/direttore/config-repo` | Local clone path on the server |
+| **`GIT_CONFIG_AUTHOR_NAME`** | `Direttore` | Git commit author name |
+| **`GIT_CONFIG_AUTHOR_EMAIL`** | `direttore@localhost` | Git commit author email |
 
 ---
 
@@ -269,7 +306,46 @@ The Vite dev server also proxies the following paths directly to the FastAPI bac
 |---|---|---|
 | `GET` | `/healthz` | Returns `{"status":"ok","mock_mode":<bool>}` |
 
----
+### Hardware Endpoints (Unimus Pro + Git)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/hardware/status` | Reachability check for Unimus and Git config repo |
+| `GET` | `/api/hardware/debug-unimus` | Raw multi-endpoint probe for Unimus — returns full HTTP status/body for debugging |
+| `GET` | `/api/hardware/devices` | List physical devices from NetBox (filterable: `?site=&role=&status=&limit=`) |
+| `GET` | `/api/hardware/devices/{id}` | Full device detail: NetBox data + interface table, dual-stack mgmt IPs |
+| `POST` | `/api/hardware/devices/{id}/backup` | Synchronous backup: trigger Unimus → poll until done → retrieve config → commit to Git |
+| `GET` | `/api/hardware/devices/{id}/configs` | Git log for this device's config file (`?limit=30`) |
+| `GET` | `/api/hardware/devices/{id}/configs/{ref}` | Config file content at a specific git commit SHA |
+| `POST` | `/api/hardware/devices/{id}/provision` | Push golden config to device via Unimus Pro |
+
+#### Backup request body (`POST /api/hardware/devices/{id}/backup`)
+
+```json
+{ "targets": ["unimus", "git"] }
+```
+
+`targets` is optional — defaults to both. Use `["unimus"]` to skip Git archiving or `["git"]` to archive an existing Unimus backup without re-triggering.
+
+#### Provision request body (`POST /api/hardware/devices/{id}/provision`)
+
+```json
+{
+  "source": "git",
+  "git_ref": "a1b2c3d4",
+  "note": "Rolling back after bad change"
+}
+```
+
+| Field | Values | Description |
+|---|---|---|
+| `source` | `"git"` \| `"unimus"` | Source of truth for the golden config |
+| `git_ref` | commit SHA or `null` | `null` = HEAD (latest committed config); ignored when `source="unimus"` |
+| `note` | string | Human-readable note attached to the Unimus push job |
+
+> [!WARNING]
+> Provisioning pushes a config to a **live device** via Unimus Pro. Always verify the selected config in the Config History tab before provisioning.
+
 
 ## nginx Reverse Proxy
 
@@ -407,32 +483,36 @@ direttore/
 │   │   │   ├── templates.py      # ISO/template listing
 │   │   │   ├── network.py        # Bridge interface listing
 │   │   │   └── storage.py        # Storage pool listing
-│   │   └── netbox/               # NetBox API client
+│   │   ├── netbox/               # NetBox API client + IPAM allocation
+│   │   ├── unimus/               # Unimus Pro REST API client
+│   │   │   └── __init__.py       #   backup/poll/push, _unwrap normalizer
+│   │   └── git_config/           # Git config archive service
+│   │       └── __init__.py       #   clone/pull/read/write/push
 │   ├── routes/                   # FastAPI routers
 │   │   ├── proxmox.py            # /api/proxmox/* routes
 │   │   ├── reservations.py       # /api/reservations/* routes
-│   │   └── inventory.py          # /api/inventory/* routes
+│   │   ├── inventory.py          # /api/inventory/* routes
+│   │   └── hardware.py           # /api/hardware/* routes (new)
 │   └── scripts/                  # Dev / ops helper scripts
 │       ├── init_proxmox_node.sh  # Bootstrap Proxmox Docker container
 │       └── seed_test_resources.sh
 ├── frontend/                     # React + Vite SPA
 │   ├── src/
 │   │   ├── api/                  # Axios client + typed API functions
+│   │   │   ├── client.js         # Axios base instance
+│   │   │   ├── hardware.js       # Hardware management calls (new)
+│   │   │   └── ...               # Other API modules
 │   │   ├── components/
 │   │   │   ├── Layout.jsx        # Sidebar navigation
 │   │   │   └── NetBoxNicPicker.jsx  # NetBox IPAM modal
 │   │   ├── features/
 │   │   │   ├── provisioning/     # Wizard steps, hooks, utils
-│   │   │   │   ├── ProvisioningFeature.jsx
-│   │   │   │   ├── components/   # TypeStep, TemplateStep, UserStep, ...
-│   │   │   │   ├── hooks/        # useProvisioningData, useProvisioningForm
-│   │   │   │   └── utils/        # formatters
 │   │   │   └── topology/         # Lab Topology canvas
-│   │   │       └── components/   # TopologySidebar, ResourceNode, ...
 │   │   └── pages/
 │   │       ├── Dashboard.jsx     # Node cards + resource bars
 │   │       ├── Resources.jsx     # VM/CT table with actions
 │   │       ├── Provision.jsx     # Provision wizard wrapper
+│   │       ├── Hardware.jsx      # Physical device management (new)
 │   │       ├── Lab.jsx           # React Flow topology canvas
 │   │       └── Reservations.jsx  # FullCalendar + booking modal
 │   ├── vite.config.js
@@ -510,11 +590,15 @@ uv run python nornir_automation/generate_and_push.py
 | Feature | Status | Effort |
 |---|---|---|
 | JWT Authentication (local users) | ✅ Done | — |
+| Hardware Management — Unimus backup + Git archive | ✅ Done | — |
+| Hardware Management — golden-config provisioning | ✅ Done | — |
 | Real-time VM console (xterm.js + WebSocket) | Planned | 15 hrs |
 | Snapshot management UI | Planned | 5 hrs |
 | Prometheus metrics endpoint | Planned | 8 hrs |
 | Two-way iCAL sync (CalDAV) | Planned | 8 hrs |
 | YANG config validation | Planned | 5 hrs |
+| Unimus device-address auto-match (hostname vs IP) | Planned | 2 hrs |
+| Config diff viewer in Hardware History tab | Planned | 3 hrs |
 
 ---
 
