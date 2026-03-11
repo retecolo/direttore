@@ -344,16 +344,17 @@ def _decode_backup(backup: dict[str, Any]) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------
 # Trigger backup job
-# ---------------------------------------------------------------------------
-
-# Known Unimus endpoint variants for triggering a device backup.
-# Different Unimus builds/versions use different paths — we try each in order.
+# ----------------------# Known Unimus endpoint variants for triggering a device backup.
+# Unimus 2.8+ uses PATCH /api/v2/jobs/backup with deviceIds as a query param.
+# Older builds used POST to various /jobs/* paths.
 _BACKUP_JOB_VARIANTS: list[tuple[str, str]] = [
-    # (HTTP method, URL path)
-    ("POST", "/api/v2/jobs/backupDevices"),       # documented Pro API
-    ("POST", "/api/v2/jobs/backup/devices"),       # alternate path format
-    ("POST", "/api/v2/devices/backup"),            # some builds
-    ("POST", "/api/v2/jobs"),                      # generic job creation
+    # Unimus 2.x (2.8.0 confirmed): PATCH with query-param deviceIds
+    ("PATCH", "/api/v2/jobs/backup"),
+    # Legacy POST variants kept as fallback for older installs
+    ("POST", "/api/v2/jobs/backupDevices"),
+    ("POST", "/api/v2/jobs/backup/devices"),
+    ("POST", "/api/v2/devices/backup"),
+    ("POST", "/api/v2/jobs"),
 ]
 
 
@@ -363,14 +364,17 @@ async def trigger_backup(
     """
     Attempt to trigger a backup job for the given device IDs.
 
-    Tries each known Unimus endpoint variant in order until one succeeds
-    (2xx response).  If all variants return 404 / 405, falls back to
-    returning the latest existing backup for the first device ID so the
-    caller can still archive whatever Unimus already has.
+    Unimus 2.8+ uses:
+        PATCH /api/v2/jobs/backup?deviceIds=5,7,12
+    Older Unimus builds used POST variants.
+
+    Tries each known variant in order until one succeeds (2xx response).
+    If all variants return 404/405, falls back to returning the latest
+    existing backup for the first device ID.
 
     Returns a dict with:
       {"triggered": bool, "job": {...} | None, "fallback_backup": {...} | None,
-       "tried": ["POST /path → 404", ...], "error": str | None}
+       "tried": ["PATCH /path → 200", ...], "error": str | None}
     """
     result: dict[str, Any] = {
         "triggered":        False,
@@ -380,27 +384,40 @@ async def trigger_backup(
         "error":            None,
     }
 
-    # Body variants to try alongside each endpoint
-    def _body(path: str) -> dict[str, Any]:
-        """Construct the right request body for each endpoint style."""
-        if "backupDevices" in path or "backup/devices" in path or "devices/backup" in path:
-            return {"deviceIds": [str(d) for d in device_ids]}
-        # Generic /api/v2/jobs endpoint
-        return {"type": "BACKUP", "deviceIds": [str(d) for d in device_ids]}
+    ids_csv   = ",".join(str(d) for d in device_ids)
+    ids_list  = [str(d) for d in device_ids]
 
     async with httpx.AsyncClient(timeout=TIMEOUT, verify=VERIFY) as client:
         for method, path in _BACKUP_JOB_VARIANTS:
             url = f"{_base()}{path}"
             try:
-                r = await client.post(url, json=_body(path), headers=_headers())
+                if method == "PATCH":
+                    # Unimus 2.x: comma-separated deviceIds as query parameter
+                    r = await client.patch(
+                        url,
+                        params={"deviceIds": ids_csv},
+                        headers=_headers(),
+                    )
+                else:
+                    # Legacy POST variants used JSON body
+                    body: dict[str, Any]
+                    if "backupDevices" in path or "backup/devices" in path or "devices/backup" in path:
+                        body = {"deviceIds": ids_list}
+                    else:
+                        body = {"type": "BACKUP", "deviceIds": ids_list}
+                    r = await client.post(url, json=body, headers=_headers())
+
                 label = f"{method} {path} → {r.status_code}"
                 result["tried"].append(label)
                 log.debug("trigger_backup: %s", label)
 
                 if r.is_success:
                     result["triggered"] = True
-                    result["job"]       = _unwrap(r.json()) or {}
-                    log.info("trigger_backup: succeeded via %s", path)
+                    try:
+                        result["job"] = _unwrap(r.json()) or {}
+                    except Exception:
+                        result["job"] = {}
+                    log.info("trigger_backup: succeeded via %s %s", method, path)
                     return result
 
                 if r.status_code not in (404, 405, 400):
@@ -409,7 +426,7 @@ async def trigger_backup(
                     log.warning("trigger_backup: stopping on %s: %s",
                                 r.status_code, result["error"])
                     return result
-                # 404 / 405 — endpoint doesn’t exist, try next variant
+                # 404 / 405 — endpoint doesn't exist, try next variant
 
             except Exception as exc:
                 label = f"{method} {path} → {type(exc).__name__}: {exc}"
