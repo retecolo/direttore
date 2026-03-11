@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from api.config import settings
 from api.services import unimus
+from api.services.unimus import link_store
 from api.services import git_config as git
 from api.services.netbox import client as nb
 
@@ -104,9 +105,53 @@ async def debug_unimus() -> dict[str, Any]:
     return await unimus.raw_probe()
 
 
-
 # ---------------------------------------------------------------------------
-# Device list
+# Unimus device list + manual link management
+# ---------------------------------------------------------------------------
+
+@router.get("/unimus-devices")
+async def list_unimus_devices() -> list[dict[str, Any]]:
+    """Return all devices known to Unimus (id, address, vendor, type, lastJobStatus)."""
+    if not settings.unimus_url:
+        raise HTTPException(status_code=503, detail="UNIMUS_URL not configured")
+    devices = await unimus.list_devices(size=1000)
+    return [
+        {
+            "id":            d.get("id"),
+            "address":       d.get("address"),
+            "vendor":        d.get("vendor"),
+            "type":          d.get("type"),
+            "lastJobStatus": d.get("lastJobStatus"),
+        }
+        for d in devices
+    ]
+
+
+class UnimusLinkBody(BaseModel):
+    unimus_address: str
+
+
+@router.get("/devices/{device_id}/unimus-link")
+async def get_unimus_link(device_id: int) -> dict[str, Any]:
+    """Return the manually pinned Unimus address for this NetBox device (if any)."""
+    addr = link_store.get_link(device_id)
+    return {"netbox_device_id": device_id, "unimus_address": addr, "linked": addr is not None}
+
+
+@router.put("/devices/{device_id}/unimus-link")
+async def set_unimus_link(device_id: int, body: UnimusLinkBody) -> dict[str, Any]:
+    """Manually pin this NetBox device to a Unimus address string."""
+    link_store.set_link(device_id, body.unimus_address)
+    return {"netbox_device_id": device_id, "unimus_address": body.unimus_address, "linked": True}
+
+
+@router.delete("/devices/{device_id}/unimus-link")
+async def delete_unimus_link(device_id: int) -> dict[str, Any]:
+    """Remove a manual Unimus device link."""
+    removed = link_store.delete_link(device_id)
+    return {"netbox_device_id": device_id, "removed": removed}
+
+
 # ---------------------------------------------------------------------------
 
 @router.get("/devices")
@@ -254,12 +299,23 @@ async def backup_device(device_id: int, req: BackupRequest) -> dict[str, Any]:
         if not settings.unimus_url:
             result["warnings"].append("UNIMUS_URL not configured — skipping Unimus backup")
         else:
-            unimus_device = await unimus.find_device(mgmt_ip, name=hostname)
+            unimus_device = await unimus.find_device(
+                mgmt_ip, name=hostname, netbox_id=device_id
+            )
             if not unimus_device:
+                # Fetch Unimus device list so the frontend can show a picker
+                try:
+                    candidates = await unimus.list_devices(size=1000)
+                except Exception:
+                    candidates = []
+                result["unimus_candidates"] = [
+                    {"id": d.get("id"), "address": d.get("address"),
+                     "vendor": d.get("vendor"), "type": d.get("type")}
+                    for d in candidates
+                ]
                 result["warnings"].append(
-                    f"Device '{hostname}' ({mgmt_ip}) not found in Unimus. "
-                    "Searched by IP, reverse-DNS hostname, device name, and linear scan. "
-                    "Ensure the device is added to Unimus and shares a resolvable address."
+                    f"Device '{hostname}' ({mgmt_ip}) not found in Unimus automatically. "
+                    "Use the 'unimus_candidates' list to link the correct device."
                 )
             else:
                 uid = unimus_device.get("id")

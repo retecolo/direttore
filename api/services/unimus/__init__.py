@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from api.config import settings
+from api.services.unimus import link_store as link_store  # noqa: F401 – re-exported
 
 log = logging.getLogger(__name__)
 TIMEOUT = 30          # Unimus can be slow on large device sets
@@ -197,18 +198,34 @@ async def find_device_by_address(address: str) -> dict[str, Any] | None:
         return payload if isinstance(payload, dict) and payload else None
 
 
-async def find_device(address: str, name: str | None = None) -> dict[str, Any] | None:
+async def find_device(
+    address: str,
+    name: str | None = None,
+    netbox_id: int | str | None = None,
+) -> dict[str, Any] | None:
     """
     Locate a Unimus device using multiple strategies, in order:
 
-    1. findByAddress(address)        — exact match on the stored address field
-    2. findByAddress(rdns_hostname)  — reverse-DNS FQDN of the IP address
-    3. findByAddress(name)           — NetBox device name as the address key
-    4. Linear scan of all devices    — case-insensitive match on address or name
+    0. Link store             — manually pinned NetBox ID → Unimus address
+    1. findByAddress(address) — exact match on the stored address field
+    2. findByAddress(rDNS)    — reverse-DNS FQDN of the IP
+    3. findByAddress(name)    — NetBox device name as the Unimus address key
+    4. Linear scan            — case-insensitive / substring match across all devices
 
-    This handles the common mismatch where Unimus stores devices by FQDN
-    (e.g. "gw1.example.com") while NetBox has a bare IP as primary_ip.
+    Pass netbox_id to enable Strategy 0 (manual link store lookup).
     """
+    # Strategy 0 — check manual link store first (fastest, most reliable)
+    if netbox_id is not None:
+        linked_addr = link_store.get_link(netbox_id)
+        if linked_addr:
+            log.debug("find_device: strategy 0 — link store hit for device %s: %s",
+                      netbox_id, linked_addr)
+            device = await find_device_by_address(linked_addr)
+            if device:
+                return device
+            log.warning("find_device: link store address '%s' not found in Unimus — "
+                        "may be stale; falling through to other strategies", linked_addr)
+
     # Strategy 1 — exact IP / address match
     log.debug("find_device: strategy 1 — findByAddress(%s)", address)
     device = await find_device_by_address(address)
