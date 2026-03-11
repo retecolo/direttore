@@ -92,6 +92,19 @@ async def hardware_status() -> dict[str, Any]:
     return {"unimus": unimus_status, "git": git_status}
 
 
+@router.get("/debug-unimus")
+async def debug_unimus() -> dict[str, Any]:
+    """
+    Raw connectivity probe for Unimus — returns full HTTP status codes and
+    response bodies from multiple endpoints.  Use this when /status shows
+    Unimus as unreachable to diagnose the exact failure reason.
+
+    Example: GET /api/hardware/debug-unimus
+    """
+    return await unimus.raw_probe()
+
+
+
 # ---------------------------------------------------------------------------
 # Device list
 # ---------------------------------------------------------------------------
