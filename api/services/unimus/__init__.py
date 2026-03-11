@@ -60,12 +60,24 @@ def _unwrap(body: dict[str, Any]) -> Any:
 
 
 def _unwrap_list(body: dict[str, Any]) -> list[dict[str, Any]]:
-    """Unwrap and extract the 'content' array from a paginated Unimus response."""
-    inner = _unwrap(body)
-    if isinstance(inner, list):
-        return inner
-    if isinstance(inner, dict):
-        return inner.get("content", [])
+    """
+    Extract the items list from a Unimus paginated response.
+
+    Actual format (confirmed from live API):
+        { "data": [...items...], "paginator": { "totalCount": N } }
+
+    Legacy / alternate format:
+        { "data": { "content": [...] }, "paginator": {...} }
+        { "content": [...] }   (no wrapper)
+    """
+    if "data" in body:
+        data = body["data"]
+        if isinstance(data, list):
+            return data                   # standard format ✓
+        if isinstance(data, dict):
+            return data.get("content", [])  # legacy nested format
+    if "content" in body:
+        return body["content"]           # no-wrapper fallback
     return []
 
 
@@ -105,11 +117,9 @@ async def check_status() -> dict[str, Any]:
             return {"reachable": False, "reason": _fmt_error(r),
                     "url": settings.unimus_url, "http_status": r.status_code}
 
-        body = r.json()
-        inner = _unwrap(body)
-        total = (inner.get("paginator") or inner.get("totalCount") or {})
-        if isinstance(total, dict):
-            total = total.get("totalCount", "?")
+        body  = r.json()
+        # paginator is always at the top level, regardless of data shape
+        total = (body.get("paginator") or {}).get("totalCount", "?")
 
         return {
             "reachable":    True,
@@ -213,7 +223,9 @@ async def get_latest_backup(device_id: str) -> dict[str, Any] | None:
             return None
         r.raise_for_status()
         backup = _unwrap(r.json())
-        if not isinstance(backup, dict):
+        if isinstance(backup, list):
+            backup = backup[0] if backup else None
+        if not isinstance(backup, dict) or not backup:
             return None
         return _decode_backup(backup)
 
@@ -229,7 +241,9 @@ async def get_backup_by_id(device_id: str, backup_id: str) -> dict[str, Any] | N
             return None
         r.raise_for_status()
         backup = _unwrap(r.json())
-        if not isinstance(backup, dict):
+        if isinstance(backup, list):
+            backup = backup[0] if backup else None
+        if not isinstance(backup, dict) or not backup:
             return None
         return _decode_backup(backup)
 
