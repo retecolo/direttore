@@ -323,29 +323,57 @@ async def backup_device(device_id: int, req: BackupRequest) -> dict[str, Any]:
 
                 # Trigger synchronous backup
                 try:
-                    job = await unimus.trigger_backup([uid])
-                    job_id = job.get("id") or job.get("jobId")
+                    backup_result = await unimus.trigger_backup([uid])
 
-                    # Poll until done (synchronous — up to 2 min)
-                    if job_id:
-                        for _ in range(24):   # 24 × 5s = 2 min max
-                            await asyncio.sleep(5)
-                            status_obj = await unimus.poll_job(job_id)
-                            state = status_obj.get("status", "").upper()
-                            if state in ("FINISHED", "COMPLETED", "SUCCESS"):
-                                break
-                            if state in ("FAILED", "ERROR", "ABORTED"):
-                                result["warnings"].append(f"Unimus backup job {job_id} ended with status: {state}")
-                                break
+                    # surface which endpoints were tried (helps diagnose)
+                    tried = backup_result.get("tried") or []
+                    if tried:
+                        log.info("trigger_backup tried: %s", tried)
 
-                    # Retrieve config text
-                    backup = await unimus.get_latest_backup(uid)
-                    if backup:
-                        config_text = backup.get("content_text", "")
-                        result["timestamp"] = backup.get("created")
-                        result["config_preview"] = (config_text or "")[:500]
+                    if backup_result.get("triggered"):
+                        # Fresh backup triggered — poll job for completion
+                        job    = backup_result.get("job") or {}
+                        job_id = job.get("id") or job.get("jobId")
+                        if job_id:
+                            for _ in range(24):   # 24 × 5s = 2 min max
+                                await asyncio.sleep(5)
+                                status_obj = await unimus.poll_job(job_id)
+                                state = status_obj.get("status", "").upper()
+                                if state in ("FINISHED", "COMPLETED", "SUCCESS"):
+                                    break
+                                if state in ("FAILED", "ERROR", "ABORTED"):
+                                    result["warnings"].append(
+                                        f"Unimus backup job {job_id} ended with status: {state}"
+                                    )
+                                    break
+
+                        # Retrieve config text from Unimus after job
+                        backup = await unimus.get_latest_backup(uid)
+
+                    elif backup_result.get("fallback_backup"):
+                        # No working trigger endpoint — use last known backup
+                        backup = backup_result["fallback_backup"]
+                        result["warnings"].append(
+                            backup_result.get("error") or
+                            "No Unimus job trigger endpoint found; using latest stored backup."
+                        )
+                        result["tried_endpoints"] = tried
                     else:
-                        result["warnings"].append("Unimus backup triggered but no backup found afterward")
+                        backup = None
+                        result["warnings"].append(
+                            backup_result.get("error") or
+                            "Unimus backup failed and no existing backup available."
+                        )
+                        result["tried_endpoints"] = tried
+
+                    if backup:
+                        config_text             = backup.get("content_text", "")
+                        result["timestamp"]     = backup.get("created")
+                        result["config_preview"] = (config_text or "")[:500]
+                    elif backup_result.get("triggered"):
+                        result["warnings"].append(
+                            "Unimus backup was triggered but no backup found afterward"
+                        )
 
                 except Exception as exc:
                     result["warnings"].append(f"Unimus backup error: {exc}")

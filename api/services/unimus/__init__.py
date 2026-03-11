@@ -346,18 +346,99 @@ def _decode_backup(backup: dict[str, Any]) -> dict[str, Any]:
 # Trigger backup job
 # ---------------------------------------------------------------------------
 
-async def trigger_backup(device_ids: list[str]) -> dict[str, Any]:
-    """Trigger a backup job for one or more Unimus-managed devices."""
+# Known Unimus endpoint variants for triggering a device backup.
+# Different Unimus builds/versions use different paths — we try each in order.
+_BACKUP_JOB_VARIANTS: list[tuple[str, str]] = [
+    # (HTTP method, URL path)
+    ("POST", "/api/v2/jobs/backupDevices"),       # documented Pro API
+    ("POST", "/api/v2/jobs/backup/devices"),       # alternate path format
+    ("POST", "/api/v2/devices/backup"),            # some builds
+    ("POST", "/api/v2/jobs"),                      # generic job creation
+]
+
+
+async def trigger_backup(
+    device_ids: list[str | int],
+) -> dict[str, Any]:
+    """
+    Attempt to trigger a backup job for the given device IDs.
+
+    Tries each known Unimus endpoint variant in order until one succeeds
+    (2xx response).  If all variants return 404 / 405, falls back to
+    returning the latest existing backup for the first device ID so the
+    caller can still archive whatever Unimus already has.
+
+    Returns a dict with:
+      {"triggered": bool, "job": {...} | None, "fallback_backup": {...} | None,
+       "tried": ["POST /path → 404", ...], "error": str | None}
+    """
+    result: dict[str, Any] = {
+        "triggered":        False,
+        "job":              None,
+        "fallback_backup":  None,
+        "tried":            [],
+        "error":            None,
+    }
+
+    # Body variants to try alongside each endpoint
+    def _body(path: str) -> dict[str, Any]:
+        """Construct the right request body for each endpoint style."""
+        if "backupDevices" in path or "backup/devices" in path or "devices/backup" in path:
+            return {"deviceIds": [str(d) for d in device_ids]}
+        # Generic /api/v2/jobs endpoint
+        return {"type": "BACKUP", "deviceIds": [str(d) for d in device_ids]}
+
     async with httpx.AsyncClient(timeout=TIMEOUT, verify=VERIFY) as client:
-        r = await client.post(
-            f"{_base()}/api/v2/jobs/backupDevices",
-            json={"deviceIds": device_ids},
-            headers=_headers(),
+        for method, path in _BACKUP_JOB_VARIANTS:
+            url = f"{_base()}{path}"
+            try:
+                r = await client.post(url, json=_body(path), headers=_headers())
+                label = f"{method} {path} → {r.status_code}"
+                result["tried"].append(label)
+                log.debug("trigger_backup: %s", label)
+
+                if r.is_success:
+                    result["triggered"] = True
+                    result["job"]       = _unwrap(r.json()) or {}
+                    log.info("trigger_backup: succeeded via %s", path)
+                    return result
+
+                if r.status_code not in (404, 405, 400):
+                    # Unexpected failure (auth, server error) — stop trying
+                    result["error"] = _fmt_error(r)
+                    log.warning("trigger_backup: stopping on %s: %s",
+                                r.status_code, result["error"])
+                    return result
+                # 404 / 405 — endpoint doesn’t exist, try next variant
+
+            except Exception as exc:
+                label = f"{method} {path} → {type(exc).__name__}: {exc}"
+                result["tried"].append(label)
+                log.warning("trigger_backup: %s", label)
+
+    # All trigger endpoints failed — fetch latest existing backup as fallback
+    if device_ids:
+        log.warning(
+            "trigger_backup: all job endpoints returned 404/405 — "
+            "falling back to latest existing Unimus backup for device %s",
+            device_ids[0],
         )
-        if not r.is_success:
-            log.warning("trigger_backup error: %s", _fmt_error(r))
-        r.raise_for_status()
-        return _unwrap(r.json()) or {}
+        try:
+            backup = await get_latest_backup(str(device_ids[0]))
+            result["fallback_backup"] = backup
+            if backup:
+                result["error"] = (
+                    "Could not trigger a fresh backup (no working job endpoint found). "
+                    "Returning the latest backup already stored in Unimus."
+                )
+            else:
+                result["error"] = (
+                    "Could not trigger a fresh backup and no existing backup found in Unimus."
+                )
+        except Exception as exc:
+            result["error"] = f"Fallback get_latest_backup failed: {exc}"
+
+    return result
 
 
 async def poll_job(job_id: str) -> dict[str, Any]:
@@ -411,20 +492,47 @@ async def raw_probe() -> dict[str, Any]:
         "probes":      {},
     }
 
-    probes = [
-        ("GET /api/v2/devices?size=1", "GET", f"{_base()}/api/v2/devices", {"size": 1}),
-        ("GET /api/v2/",              "GET", f"{_base()}/api/v2/",         {}),
+    # (label, method, url, params, body)
+    probes: list[tuple[str, str, str, dict, dict | None]] = [
+        # Device list — confirms connectivity + auth
+        ("GET /api/v2/devices?size=1", "GET",
+         f"{_base()}/api/v2/devices", {"size": 1}, None),
+
+        # Backup history (requires an actual device ID — use dummy 0)
+        ("GET /api/v2/devices/0/backups", "GET",
+         f"{_base()}/api/v2/devices/0/backups", {}, None),
+
+        # Job trigger endpoint variants — POST with minimal body
+        ("POST /api/v2/jobs/backupDevices", "POST",
+         f"{_base()}/api/v2/jobs/backupDevices", {}, {"deviceIds": []}),
+
+        ("POST /api/v2/jobs/backup/devices", "POST",
+         f"{_base()}/api/v2/jobs/backup/devices", {}, {"deviceIds": []}),
+
+        ("POST /api/v2/devices/backup", "POST",
+         f"{_base()}/api/v2/devices/backup", {}, {"deviceIds": []}),
+
+        ("POST /api/v2/jobs", "POST",
+         f"{_base()}/api/v2/jobs", {}, {"type": "BACKUP", "deviceIds": []}),
+
+        # Config push (Pro feature)
+        ("POST /api/v2/jobs/pushConfig", "POST",
+         f"{_base()}/api/v2/jobs/pushConfig", {},
+         {"deviceIds": [], "scriptContent": ""}),
     ]
 
     async with httpx.AsyncClient(timeout=10, verify=VERIFY) as client:
-        for label, method, url, params in probes:
+        for label, method, url, params, body in probes:
             try:
-                r = await client.get(url, params=params, headers=_headers())
+                if method == "POST":
+                    r = await client.post(url, json=body, headers=_headers())
+                else:
+                    r = await client.get(url, params=params, headers=_headers())
                 try:
-                    body = r.json()
+                    rb = r.json()
                 except Exception:
-                    body = r.text[:300]
-                results["probes"][label] = {"status": r.status_code, "body": body}
+                    rb = r.text[:300]
+                results["probes"][label] = {"status": r.status_code, "body": rb}
             except Exception as exc:
                 results["probes"][label] = {"error": f"{type(exc).__name__}: {exc}"}
 
