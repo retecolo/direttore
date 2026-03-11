@@ -254,11 +254,12 @@ async def backup_device(device_id: int, req: BackupRequest) -> dict[str, Any]:
         if not settings.unimus_url:
             result["warnings"].append("UNIMUS_URL not configured — skipping Unimus backup")
         else:
-            unimus_device = await unimus.find_device_by_address(mgmt_ip)
+            unimus_device = await unimus.find_device(mgmt_ip, name=hostname)
             if not unimus_device:
                 result["warnings"].append(
-                    f"Device {mgmt_ip} not found in Unimus. "
-                    "Ensure it is added to Unimus and reachable."
+                    f"Device '{hostname}' ({mgmt_ip}) not found in Unimus. "
+                    "Searched by IP, reverse-DNS hostname, device name, and linear scan. "
+                    "Ensure the device is added to Unimus and shares a resolvable address."
                 )
             else:
                 uid = unimus_device.get("id")
@@ -417,11 +418,14 @@ async def provision_device(device_id: int, req: ProvisionRequest) -> dict[str, A
         raise HTTPException(status_code=503, detail="UNIMUS_URL not configured")
 
     # Locate device in Unimus
-    unimus_device = await unimus.find_device_by_address(mgmt_ip)
+    unimus_device = await unimus.find_device(mgmt_ip, name=hostname)
     if not unimus_device:
         raise HTTPException(
             status_code=404,
-            detail=f"Device {mgmt_ip} ({hostname}) not found in Unimus",
+            detail=(
+                f"Device '{hostname}' ({mgmt_ip}) not found in Unimus. "
+                "Searched by IP, reverse-DNS FQDN, device name, and linear scan."
+            ),
         )
     uid = unimus_device.get("id")
 

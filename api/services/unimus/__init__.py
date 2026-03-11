@@ -10,6 +10,7 @@ All functions use httpx async client with SSL verification disabled by default
 
 import base64
 import logging
+import socket
 from typing import Any
 
 import httpx
@@ -196,8 +197,71 @@ async def find_device_by_address(address: str) -> dict[str, Any] | None:
         return payload if isinstance(payload, dict) and payload else None
 
 
-# ---------------------------------------------------------------------------
-# Backups
+async def find_device(address: str, name: str | None = None) -> dict[str, Any] | None:
+    """
+    Locate a Unimus device using multiple strategies, in order:
+
+    1. findByAddress(address)        — exact match on the stored address field
+    2. findByAddress(rdns_hostname)  — reverse-DNS FQDN of the IP address
+    3. findByAddress(name)           — NetBox device name as the address key
+    4. Linear scan of all devices    — case-insensitive match on address or name
+
+    This handles the common mismatch where Unimus stores devices by FQDN
+    (e.g. "gw1.example.com") while NetBox has a bare IP as primary_ip.
+    """
+    # Strategy 1 — exact IP / address match
+    log.debug("find_device: strategy 1 — findByAddress(%s)", address)
+    device = await find_device_by_address(address)
+    if device:
+        log.debug("find_device: found via address match")
+        return device
+
+    # Strategy 2 — reverse-DNS FQDN of the IP
+    fqdn: str | None = None
+    try:
+        fqdn = socket.gethostbyaddr(address)[0]
+        log.debug("find_device: rDNS(%s) → %s", address, fqdn)
+    except Exception:
+        pass
+
+    if fqdn and fqdn.lower() != address.lower():
+        log.debug("find_device: strategy 2 — findByAddress(%s)", fqdn)
+        device = await find_device_by_address(fqdn)
+        if device:
+            log.debug("find_device: found via rDNS hostname")
+            return device
+
+    # Strategy 3 — NetBox device name as the Unimus address field
+    if name and name.lower() not in (address.lower(), (fqdn or "").lower()):
+        log.debug("find_device: strategy 3 — findByAddress(%s)", name)
+        device = await find_device_by_address(name)
+        if device:
+            log.debug("find_device: found via device name")
+            return device
+
+    # Strategy 4 — linear scan (last resort; tolerates partial/case mismatches)
+    log.debug("find_device: strategy 4 — linear scan of all Unimus devices")
+    candidates: list[str] = [address.lower()]
+    if fqdn:
+        candidates.append(fqdn.lower())
+    if name:
+        candidates.append(name.lower())
+
+    try:
+        all_devices = await list_devices(size=1000)
+        for d in all_devices:
+            d_addr = (d.get("address") or "").lower()
+            if d_addr in candidates or any(c in d_addr for c in candidates):
+                log.info("find_device: matched '%s' via linear scan (candidates=%s)",
+                         d_addr, candidates)
+                return d
+    except Exception as exc:
+        log.warning("find_device: linear scan failed: %s", exc)
+
+    log.warning("find_device: no match for address=%s name=%s", address, name)
+    return None
+
+
 # ---------------------------------------------------------------------------
 
 async def list_backups(device_id: str, limit: int = 20) -> list[dict[str, Any]]:
