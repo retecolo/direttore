@@ -93,12 +93,51 @@ Unimus is contacted from the **server running Direttore**, not from your browser
 | Same error with IPv6 host | Must use bracket notation | `UNIMUS_URL=https://[2001:db8::10]` |
 | HTTP 401 | Wrong or expired API token | Re-generate in Unimus → Settings → Security → API access tokens |
 | HTTP 403 | Token lacks API permission | Enable "API Access" scope for the token |
-| Devices found but backup returns "not found in Unimus" | Unimus stores devices by **hostname**, not IP | Ensure the address in Unimus matches what NetBox has in `primary_ip` |
+| Devices found but backup returns "not found in Unimus" | Unimus stores devices by **hostname**, not IP — and there is no DNS | Use the manual Unimus device link (see below) |
+| Backup fails with `404` on `/api/v2/jobs/backupDevices` | Wrong endpoint for your Unimus version | Direttore auto-detects: tries `PATCH /api/v2/jobs/backup` first (2.8+), then POST variants |
+| Backup warning: "no working job endpoint found" | None of the trigger endpoints returned 2xx | The fallback returns the **latest existing** Unimus backup — still archives it to Git |
 
 Use the built-in debug endpoint to diagnose from the server:
 ```bash
 curl -s http://127.0.0.1:8000/api/hardware/debug-unimus | python3 -m json.tool
 ```
+This now probes **all known job endpoint variants** (GET and POST/PATCH) so you can see exactly which ones your Unimus installation exposes.
+
+#### Linking a NetBox device to a Unimus device (no DNS required)
+
+When Direttore cannot automatically match a NetBox device to a Unimus device (because Unimus stores devices by FQDN but there is no DNS), use the manual link API:
+
+```bash
+# Step 1 — list all devices known to Unimus (to find the right address string)
+curl -s http://127.0.0.1:8000/api/hardware/unimus-devices | python3 -m json.tool
+# Output: [{"id": 5, "address": "gw1.mgt.cu-es.net", "vendor": "MikroTik", ...}, ...]
+
+# Step 2 — link the NetBox device ID to the Unimus address
+# (Find the NetBox device ID from the Hardware page URL or from /api/hardware/devices)
+curl -s -X PUT http://127.0.0.1:8000/api/hardware/devices/2/unimus-link \
+  -H "Content-Type: application/json" \
+  -d '{"unimus_address": "gw1.mgt.cu-es.net"}'
+
+# Step 3 — verify
+curl -s http://127.0.0.1:8000/api/hardware/devices/2/unimus-link | python3 -m json.tool
+
+# To remove a link (e.g. after DNS is configured and auto-match works again)
+curl -s -X DELETE http://127.0.0.1:8000/api/hardware/devices/2/unimus-link
+```
+
+Links are stored in `/opt/unimus_links.json` (one directory above `GIT_CONFIG_LOCAL_PATH`) and persist across restarts. When a link exists, it takes priority over all automatic discovery strategies.
+
+#### Automatic Unimus device discovery order
+
+When a backup or provision is triggered, Direttore searches for the Unimus device using these strategies in order:
+
+| Priority | Strategy | Details |
+|---|---|---|
+| 0 | **Manual link store** | Fastest — uses the pinned `unimus_address` if set via the link API |
+| 1 | **Exact address match** | `findByAddress(primary_ip)` — works if Unimus stores the device by IP |
+| 2 | **Reverse DNS** | Resolves primary IP to FQDN, then tries `findByAddress(fqdn)` |
+| 3 | **NetBox device name** | Tries `findByAddress(hostname)` directly |
+| 4 | **Linear scan** | Fetches all Unimus devices and matches by address substring / device name |
 
 ---
 
@@ -314,10 +353,14 @@ The Vite dev server also proxies the following paths directly to the FastAPI bac
 | `GET` | `/api/hardware/debug-unimus` | Raw multi-endpoint probe for Unimus — returns full HTTP status/body for debugging |
 | `GET` | `/api/hardware/devices` | List physical devices from NetBox (filterable: `?site=&role=&status=&limit=`) |
 | `GET` | `/api/hardware/devices/{id}` | Full device detail: NetBox data + interface table, dual-stack mgmt IPs |
-| `POST` | `/api/hardware/devices/{id}/backup` | Synchronous backup: trigger Unimus → poll until done → retrieve config → commit to Git |
+| `POST` | `/api/hardware/devices/{id}/backup` | Trigger Unimus backup → poll until done → retrieve config → commit to Git |
 | `GET` | `/api/hardware/devices/{id}/configs` | Git log for this device's config file (`?limit=30`) |
 | `GET` | `/api/hardware/devices/{id}/configs/{ref}` | Config file content at a specific git commit SHA |
 | `POST` | `/api/hardware/devices/{id}/provision` | Push golden config to device via Unimus Pro |
+| `GET` | `/api/hardware/devices/{id}/unimus-link` | Get the manually pinned Unimus address for this device |
+| `PUT` | `/api/hardware/devices/{id}/unimus-link` | Set a manual Unimus device link (`{"unimus_address": "host.example.com"}`) |
+| `DELETE` | `/api/hardware/devices/{id}/unimus-link` | Remove a manual Unimus device link |
+| `GET` | `/api/hardware/unimus-devices` | List all devices known to Unimus (id, address, vendor, type, lastJobStatus) |
 
 #### Backup request body (`POST /api/hardware/devices/{id}/backup`)
 
@@ -326,6 +369,14 @@ The Vite dev server also proxies the following paths directly to the FastAPI bac
 ```
 
 `targets` is optional — defaults to both. Use `["unimus"]` to skip Git archiving or `["git"]` to archive an existing Unimus backup without re-triggering.
+
+> [!NOTE]
+> **Unimus version compatibility:** Direttore detects the correct backup trigger endpoint automatically:
+> - **Unimus 2.8+**: `PATCH /api/v2/jobs/backup?deviceIds=<id>` (query param, no JSON body)
+> - **Older Unimus**: tries several `POST /api/v2/jobs/*` variants
+> - **Fallback**: if no trigger endpoint works, archives the latest backup already stored in Unimus
+>
+> The backup response includes `"tried_endpoints"` showing which endpoints were attempted.
 
 #### Provision request body (`POST /api/hardware/devices/{id}/provision`)
 
@@ -566,6 +617,14 @@ The `snmp_to_netbox.sh` bash script walks a live network device via SNMP and pus
 ./snmp_to_netbox.sh -f devices.csv
 ```
 
+#### Known platform quirks fixed in the script
+
+| Platform | Issue | Fix applied |
+|---|---|---|
+| **Junos** | `sysDescr` contains forward slashes (e.g. `Junos 23.2R1/amd64`), breaking `sed 's/...//'` | All `sed` delimiters changed from `/` to `\|` |
+| **Junos** | Doesn't respond to `IF-MIB::ifDescr` (MIB name form) | Script retries with numeric OID `1.3.6.1.2.1.2.2.1.2` if MIB-name walk returns 0 interfaces |
+| **`/bin/sh` (dash)** | `grep -c` output with trailing newline causes `[: Illegal number:` in arithmetic comparisons | Counts are stripped with `tr -d '[:space:]'` and defaulted with `${var:-0}` |
+
 ---
 
 ## Physical Network Automation (NetBox + Nornir + Unimus)
@@ -592,12 +651,15 @@ uv run python nornir_automation/generate_and_push.py
 | JWT Authentication (local users) | ✅ Done | — |
 | Hardware Management — Unimus backup + Git archive | ✅ Done | — |
 | Hardware Management — golden-config provisioning | ✅ Done | — |
+| Unimus device-address auto-match (4-strategy: IP→rDNS→name→scan) | ✅ Done | — |
+| Manual Unimus device link store (DNS-free pairing) | ✅ Done | — |
+| Unimus 2.8 backup endpoint auto-detection | ✅ Done | — |
 | Real-time VM console (xterm.js + WebSocket) | Planned | 15 hrs |
 | Snapshot management UI | Planned | 5 hrs |
 | Prometheus metrics endpoint | Planned | 8 hrs |
 | Two-way iCAL sync (CalDAV) | Planned | 8 hrs |
 | YANG config validation | Planned | 5 hrs |
-| Unimus device-address auto-match (hostname vs IP) | Planned | 2 hrs |
+| SSH-based direct backup (NAPALM/Netmiko, no Unimus) | Planned | 8 hrs |
 | Config diff viewer in Hardware History tab | Planned | 3 hrs |
 
 ---
