@@ -1,3 +1,6 @@
+# Hardware / Unimus / Git config settings added to existing Settings class.
+# These are appended — do not replace config.py; add the fields below.
+
 """Configuration settings loaded from environment / .env file."""
 
 
@@ -27,6 +30,19 @@ class Settings(BaseSettings):
 
     # CORS — comma-separated allowed origins
     api_cors_origins: str = "http://localhost:5173,http://localhost:3000"
+
+    # Unimus (Pro)
+    unimus_url: str = ""          # e.g. https://unimus.example.com
+    unimus_token: str = ""        # API token from Unimus → Settings → API access
+
+    # Git config repository
+    git_config_repo: str = ""         # HTTPS or SSH clone URL
+    git_config_branch: str = "main"   # branch to read/write configs on
+    git_config_auth_token: str = ""   # GitHub/GitLab PAT for HTTPS push
+    git_config_local_path: str = "/opt/direttore/config-repo"
+    # Filesystem path used as the author identity in commits
+    git_config_author_name: str = "Direttore"
+    git_config_author_email: str = "direttore@localhost"
 
     @property
     def cors_origins(self) -> list[str]:

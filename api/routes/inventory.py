@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """FastAPI router — NetBox inventory proxy."""
 
-from typing import Any
+import ipaddress
+from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 import httpx
 
 from api.schemas.inventory import NetBoxStatusResponse
@@ -119,8 +121,78 @@ async def list_vlans(
         status=status,
         q=q,
     )
-
     try:
         return await nb.fetch_vlans(params)
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"NetBox error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# IP Allocation
+# ---------------------------------------------------------------------------
+
+class AllocateIPRequest(BaseModel):
+    prefix_id: int
+    hostname: str
+    resource_type: Literal["lxc", "vm"] = "lxc"
+
+
+@router.post("/allocate-ip")
+async def allocate_ip(req: AllocateIPRequest) -> dict[str, Any]:
+    """
+    Allocate the next available IP address from a NetBox prefix.
+
+    - Idempotently reserves the gateway (.1 for IPv4, ::1 for IPv6) and the
+      IPv6 network address (::) in NetBox before allocating.
+    - LXC:  creates the IP as 'active' in NetBox (container is being provisioned).
+    - VM:   creates as 'reserved' (VM provisioning to follow separately).
+
+    Returns the allocated address (CIDR), bare IP, gateway IP, family, and
+    the NetBox IP ID for auditing.
+    """
+    # Fetch prefix to get the prefix string and family
+    try:
+        prefix_obj = await nb.fetch_prefix(req.prefix_id)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"NetBox error fetching prefix: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Prefix {req.prefix_id} not found: {e}")
+
+    prefix_str = prefix_obj.get("prefix", "")
+    if not prefix_str:
+        raise HTTPException(status_code=400, detail="Prefix object has no 'prefix' field")
+
+    # Parse family from NetBox object (nested {"value": 4, "label": "IPv4"})
+    family_raw = prefix_obj.get("family", {})
+    family = family_raw.get("value") if isinstance(family_raw, dict) else int(family_raw)
+
+    try:
+        net = ipaddress.ip_network(prefix_str, strict=False)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid prefix '{prefix_str}': {e}")
+
+    prefix_len = net.prefixlen
+
+    try:
+        result = await nb.allocate_next_ip(
+            prefix_id=req.prefix_id,
+            prefix_str=prefix_str,
+            prefix_len=prefix_len,
+            family=family,
+            hostname=req.hostname,
+            resource_type=req.resource_type,
+        )
+    except ValueError as e:
+        # Raised when prefix is full (204 from NetBox)
+        raise HTTPException(status_code=409, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        body = ""
+        try:
+            body = e.response.json()
+        except Exception:
+            body = e.response.text
+        raise HTTPException(status_code=502, detail=f"NetBox error: {body}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"NetBox error: {e}")
+
+    return result

@@ -225,7 +225,7 @@ process_device() {
   _snmp_test=$(snmpget -v2c -c "$SNMP_COMMUNITY" "$SNMP_TARGET" \
     1.3.6.1.2.1.1.1.0 2>&1 || true)
   if echo "$_snmp_test" | grep -q 'STRING:'; then
-    _sysdescr=$(echo "$_snmp_test" | sed 's/.*STRING: //; s/^"//; s/"$///' | cut -c1-72)
+    _sysdescr=$(echo "$_snmp_test" | sed 's|.*STRING: ||; s|^"||; s|"$||' | cut -c1-72)
     echo "SNMP OK: $_sysdescr"
   else
     echo "WARNING: SNMP test failed for $SNMP_TARGET"
@@ -322,10 +322,25 @@ process_device() {
     2>/dev/null > "$ALIAS_FILE" || true
   dbg "ifAlias raw:"; [ "$DEBUG" -eq 1 ] && head -3 "$ALIAS_FILE" | sed 's/^/  [raw] /' >&2 || true
 
+  # Walk ifDescr — try MIB name first, fall back to numeric OID if that returns nothing
+  # (Junos and some others only respond reliably to numeric OIDs)
   TMPFILE=$(mktemp)
   snmpwalk -v2c -c "$SNMP_COMMUNITY" "$SNMP_TARGET" IF-MIB::ifDescr \
     2>/dev/null > "$TMPFILE" || true
-  iface_count=$(grep -c 'STRING:' "$TMPFILE" 2>/dev/null || echo "0")
+  iface_count=$(grep -c 'STRING:' "$TMPFILE" 2>/dev/null || true)
+  iface_count=$(echo "$iface_count" | tr -d '[:space:]')
+  iface_count=${iface_count:-0}
+
+  # If MIB-name walk returned nothing, retry with numeric OID (-On)
+  if [ "$iface_count" -eq 0 ]; then
+    dbg "MIB-name ifDescr walk empty – retrying with numeric OID"
+    snmpwalk -On -v2c -c "$SNMP_COMMUNITY" "$SNMP_TARGET" 1.3.6.1.2.1.2.2.1.2 \
+      2>/dev/null > "$TMPFILE" || true
+    iface_count=$(grep -c 'STRING:' "$TMPFILE" 2>/dev/null || true)
+    iface_count=$(echo "$iface_count" | tr -d '[:space:]')
+    iface_count=${iface_count:-0}
+  fi
+
   echo "  Found $iface_count interface(s) via SNMP"
   dbg "ifDescr raw:"; [ "$DEBUG" -eq 1 ] && head -3 "$TMPFILE" | sed 's/^/  [raw] /' >&2 || true
 
@@ -392,7 +407,9 @@ process_device() {
   TMPFILE=$(mktemp)
   snmpwalk -v2c -c "$SNMP_COMMUNITY" "$SNMP_TARGET" IP-MIB::ipAdEntAddr \
     2>/dev/null > "$TMPFILE" || true
-  ipv4_count=$(grep -c 'IpAddress:' "$TMPFILE" 2>/dev/null || echo "0")
+  ipv4_count=$(grep -c 'IpAddress:' "$TMPFILE" 2>/dev/null || true)
+  ipv4_count=$(echo "$ipv4_count" | tr -d '[:space:]')
+  ipv4_count=${ipv4_count:-0}
   echo "  Found $ipv4_count IPv4 address(es) via SNMP"
   dbg "ipAdEntAddr raw:"; [ "$DEBUG" -eq 1 ] && head -3 "$TMPFILE" | sed 's/^/  [raw] /' >&2 || true
 
@@ -412,7 +429,7 @@ process_device() {
 
       ifName=$(snmpget -v2c -c "$SNMP_COMMUNITY" "$SNMP_TARGET" \
         "IF-MIB::ifDescr.$ifIndex" 2>/dev/null \
-        | sed 's/.*STRING: //; s/^"//; s/"$//')
+        | sed 's|.*STRING: ||; s|^"||; s|"$||')
       [ -z "$ifName" ] && continue
 
       mask_line=$(snmpget -v2c -c "$SNMP_COMMUNITY" "$SNMP_TARGET" \
@@ -494,7 +511,7 @@ process_device() {
       # Interface name
       ifName=$(snmpget -On -v2c -c "$SNMP_COMMUNITY" "$SNMP_TARGET" \
         "1.3.6.1.2.1.2.2.1.2.${ifIndex}" 2>/dev/null \
-        | sed 's/.*STRING: //; s/^"//; s/"$//')
+        | sed 's|.*STRING: ||; s|^"||; s|"$||')
       [ -z "$ifName" ] && continue
 
       # Prefix length: ipAddressPfxLength  1.3.6.1.2.1.4.34.1.5.2.16.B1...B16

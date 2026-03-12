@@ -3,6 +3,7 @@
 
 import asyncio
 import ipaddress
+import logging
 from typing import Any
 
 import httpx
@@ -10,6 +11,7 @@ import httpx
 from api.config import settings
 
 TIMEOUT = 10
+log = logging.getLogger(__name__)
 
 
 def _nb_headers() -> dict[str, str]:
@@ -224,7 +226,7 @@ async def fetch_prefixes(params: dict[str, Any]) -> list[dict[str, Any]]:
 
 async def fetch_vlans(params: dict[str, Any]) -> list[dict[str, Any]]:
     """Fetch VLANs from NetBox, transformed to slim representation."""
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
         r = await client.get(
             f"{settings.netbox_url}/api/ipam/vlans/",
             params=params,
@@ -232,3 +234,270 @@ async def fetch_vlans(params: dict[str, Any]) -> list[dict[str, Any]]:
         )
         r.raise_for_status()
         return [slim_vlan(v) for v in r.json().get("results", [])]
+
+
+async def fetch_prefix(prefix_id: int) -> dict[str, Any]:
+    """Fetch a single NetBox prefix by ID."""
+    async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
+        r = await client.get(
+            f"{settings.netbox_url}/api/ipam/prefixes/{prefix_id}/",
+            headers=_nb_headers(),
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+async def _ip_exists(client: httpx.AsyncClient, address: str) -> dict[str, Any] | None:
+    """
+    Return the NetBox IP address object if it already exists, else None.
+    `address` should be a full CIDR, e.g. '10.1.2.1/24' or '2001:db8::1/64'.
+    """
+    r = await client.get(
+        f"{settings.netbox_url}/api/ipam/ip-addresses/",
+        params={"address": address},
+        headers=_nb_headers(),
+    )
+    r.raise_for_status()
+    results = r.json().get("results", [])
+    return results[0] if results else None
+
+
+async def _create_ip(
+    client: httpx.AsyncClient,
+    address: str,
+    status: str = "active",
+    dns_name: str = "",
+    description: str = "",
+) -> dict[str, Any]:
+    """Create a new IP address in NetBox and return the created object."""
+    payload: dict[str, Any] = {
+        "address": address,
+        "status": status,
+    }
+    if dns_name:
+        payload["dns_name"] = dns_name
+    if description:
+        payload["description"] = description
+    r = await client.post(
+        f"{settings.netbox_url}/api/ipam/ip-addresses/",
+        json=payload,
+        headers={**_nb_headers(), "Content-Type": "application/json"},
+    )
+    if not r.is_success:
+        # Capture the full response body so the WARNING log is useful
+        try:
+            body = r.json()
+        except Exception:
+            body = r.text
+        log.warning("NetBox rejected IP creation for %s: %s %s", address, r.status_code, body)
+        r.raise_for_status()  # still raises the HTTPStatusError
+    return r.json()
+
+
+def _forbidden_ips(prefix_str: str, family: int) -> set[str]:
+    """
+    Return the set of bare IP strings that must never be assigned to a host
+    for the given prefix.  These are the addresses we try to pre-reserve
+    in NetBox, but this set is used as a definitive guard even when
+    pre-reservation fails.
+
+    IPv4: network (.0), gateway (.1), broadcast (last)
+    IPv6: network (::), gateway (::1)
+    """
+    net = ipaddress.ip_network(prefix_str, strict=False)
+    if family == 4:
+        plen = net.prefixlen
+        if plen <= 30:
+            return {
+                str(net.network_address),
+                str(net.network_address + 1),
+                str(net.broadcast_address),
+            }
+        elif plen == 31:
+            return {
+                str(net.network_address),
+                str(net.network_address + 1),
+            }
+        else:  # /32
+            return set()
+    else:
+        return {
+            str(net.network_address),        # ::
+            str(net.network_address + 1),    # ::1
+        }
+
+
+async def check_or_reserve_gateway(
+    prefix_str: str,
+    prefix_len: int,
+    family: int,
+) -> str:
+    """
+    Idempotently reserve the conventional infrastructure addresses for a prefix
+    in NetBox, then return the gateway IP as a bare string (no CIDR mask).
+
+    IPv4 reservations (all with status='reserved'):
+      /1 – /30  →  NETWORK (.0), GATEWAY (.1), BROADCAST (last address)
+      /31       →  NETWORK (first), GATEWAY (second)   [RFC 3021 — no broadcast]
+      /32       →  nothing reserved (single-host block)
+
+    IPv6 reservations:
+      NETWORK (prefix::)    — the network/anycast address
+      GATEWAY (prefix::1)   — conventional first-hop address
+      (No broadcast in IPv6)
+    """
+    import ipaddress as _ip
+
+    net = _ip.ip_network(prefix_str, strict=False)
+    reserves: list[tuple[str, str]] = []
+
+    if family == 4:
+        if prefix_len <= 30:
+            # Standard prefix — reserve network, gateway, and broadcast
+            net_cidr   = f"{net.network_address}/{prefix_len}"
+            gw_ip      = str(net.network_address + 1)
+            gw_cidr    = f"{gw_ip}/{prefix_len}"
+            bcast_cidr = f"{net.broadcast_address}/{prefix_len}"
+            reserves = [
+                (net_cidr,   "NETWORK"),
+                (gw_cidr,    "GATEWAY"),
+                (bcast_cidr, "BROADCAST"),
+            ]
+        elif prefix_len == 31:
+            # RFC 3021 point-to-point — two usable hosts, no broadcast
+            net_cidr = f"{net.network_address}/{prefix_len}"
+            gw_ip    = str(net.network_address + 1)
+            gw_cidr  = f"{gw_ip}/{prefix_len}"
+            reserves = [
+                (net_cidr,  "NETWORK"),
+                (gw_cidr,   "GATEWAY"),
+            ]
+        else:
+            # /32 — single host, gateway is the host itself, nothing to pre-reserve
+            gw_ip = str(net.network_address)
+
+        if prefix_len <= 31:
+            gw_ip = str(net.network_address + 1)
+    else:
+        # IPv6 — reserve network (::) and gateway (::1); no broadcast
+        net_addr = str(net.network_address)      # e.g. 2001:db8::
+        gw_ip    = str(net.network_address + 1)  # e.g. 2001:db8::1
+        reserves = [
+            (f"{net_addr}/{prefix_len}", "NETWORK"),
+            (f"{gw_ip}/{prefix_len}",    "GATEWAY"),
+        ]
+
+    async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
+        for cidr, desc in reserves:
+            try:
+                existing = await _ip_exists(client, cidr)
+                if not existing:
+                    await _create_ip(client, cidr, status="reserved", description=desc)
+                    log.info("NetBox: reserved %s as %s", cidr, desc)
+                else:
+                    log.debug("NetBox: %s already exists (%s) — skipping", cidr, desc)
+            except Exception as exc:
+                # Don't abort the whole loop — log and move on.
+                # Common cause: NetBox rejects network/broadcast addresses as
+                # invalid host IPs. The GATEWAY entry must still be reserved.
+                log.warning(
+                    "NetBox: could not reserve %s (%s): %s — continuing to next address",
+                    cidr, desc, exc,
+                )
+
+    return gw_ip
+
+
+async def allocate_next_ip(
+    prefix_id: int,
+    prefix_str: str,
+    prefix_len: int,
+    family: int,
+    hostname: str,
+    resource_type: str,   # 'lxc' | 'vm'
+) -> dict[str, Any]:
+    """
+    Allocate the next available IP in a NetBox prefix.
+
+    Flow:
+      1. Idempotently reserve gateway/network/broadcast addresses in NetBox
+         (best-effort — failures are logged and skipped, not fatal).
+      2. Ask NetBox for the next available IP via available-ips.
+      3. Safety check: if NetBox hands back a forbidden address (network,
+         gateway, or broadcast) — because pre-reservation failed or NetBox
+         didn’t honour it — patch that IP to ‘reserved’ and request again.
+         Retry up to MAX_ALLOCATION_TRIES times.
+
+    The status of the created IP is:
+      - 'active'   for LXC containers (being provisioned right now)
+      - 'reserved' for VMs (will be configured later)
+    """
+    MAX_TRIES = 8
+
+    # Step 1 — best-effort reservation of infrastructure addresses
+    gateway_ip = await check_or_reserve_gateway(prefix_str, prefix_len, family)
+    forbidden  = _forbidden_ips(prefix_str, family)
+
+    # Step 2 — allocate with post-allocation safety loop
+    status = "active" if resource_type == "lxc" else "reserved"
+    payload: dict[str, Any] = {
+        "status": status,
+        "dns_name": hostname,
+        "description": f"Allocated by Direttore for {resource_type} '{hostname}'",
+    }
+    alloc_headers = {**_nb_headers(), "Content-Type": "application/json"}
+
+    async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
+        for attempt in range(1, MAX_TRIES + 1):
+            r = await client.post(
+                f"{settings.netbox_url}/api/ipam/prefixes/{prefix_id}/available-ips/",
+                json=payload,
+                headers=alloc_headers,
+            )
+            if r.status_code == 204:
+                raise ValueError(f"No available IPs left in prefix {prefix_str}")
+            r.raise_for_status()
+            created      = r.json()
+            alloc_addr   = created.get("address", "")   # e.g. "fd68::.../64"
+            bare_ip      = alloc_addr.split("/")[0]
+
+            if bare_ip not in forbidden:
+                # Good — this is a real host address
+                log.info(
+                    "NetBox: allocated %s for %s '%s' (attempt %d)",
+                    alloc_addr, resource_type, hostname, attempt,
+                )
+                break
+
+            # Forbidden address handed back — mark it reserved and retry
+            ip_id = created.get("id")
+            desc_map = {
+                str(ipaddress.ip_network(prefix_str, strict=False).network_address): "NETWORK",
+                str(ipaddress.ip_network(prefix_str, strict=False).network_address + 1): "GATEWAY",
+                str(ipaddress.ip_network(prefix_str, strict=False).broadcast_address): "BROADCAST",
+            }
+            infra_desc = desc_map.get(bare_ip, "INFRASTRUCTURE (reserved)")
+            log.warning(
+                "NetBox returned forbidden address %s (%s) on attempt %d — "
+                "patching to reserved and retrying",
+                alloc_addr, infra_desc, attempt,
+            )
+            if ip_id:
+                await client.patch(
+                    f"{settings.netbox_url}/api/ipam/ip-addresses/{ip_id}/",
+                    json={"status": "reserved", "description": infra_desc},
+                    headers=alloc_headers,
+                )
+        else:
+            raise ValueError(
+                f"Could not allocate a non-infrastructure IP from {prefix_str} "
+                f"after {MAX_TRIES} attempts. Check that the prefix has free addresses."
+            )
+
+    return {
+        "address": alloc_addr,
+        "bare_ip": bare_ip,
+        "gateway": gateway_ip,
+        "family": family,
+        "netbox_ip_id": created.get("id"),
+    }

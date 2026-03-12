@@ -7,12 +7,14 @@ Type=simple
 User=buraglio
 Group=buraglio
 WorkingDirectory=/opt/direttore
-# Uses the python virtual environment to run Uvicorn.
-# Binds to IPv6 loopback (::1) port 8000.
-ExecStart=/opt/direttore/.venv/bin/uvicorn api.main:app --host ::1 --port 8000
 
-# Optionally set environment variables here, or pass an env file:
-# EnvironmentFile=/opt/direttore/api/.env
+# Load environment variables from .env (Proxmox host, DB URL, CORS origins, etc.)
+EnvironmentFile=/opt/direttore/.env
+
+# uv run picks up the project's virtual environment automatically.
+# Binds to 0.0.0.0 so it is reachable on all IPv4 interfaces.
+# Vite's proxy targets 127.0.0.1:8000 — this must stay on IPv4.
+ExecStart=uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
 
 Restart=always
 RestartSec=5

@@ -1,24 +1,45 @@
 """Proxmox API client — wraps proxmoxer with mock support."""
 
+import logging
 from typing import Any
 from api.config import settings
 
+log = logging.getLogger(__name__)
+
+# Cache key tracks (host, user) so the client is rebuilt when config changes
 _proxmox = None
+_proxmox_key: tuple[str, str] | None = None
 
 
 def get_client():
-    """Return a cached proxmoxer ProxmoxAPI instance (or None in mock mode)."""
-    global _proxmox
+    """Return a cached proxmoxer ProxmoxAPI instance (or None in mock mode).
+
+    The cached instance is invalidated automatically if the configured host or
+    user changes (e.g. after restarting the server with a new .env file).
+    A connection timeout or auth error on first use will propagate as-is so
+    the caller can convert it to a meaningful 502 with the real error detail.
+    """
+    global _proxmox, _proxmox_key
     if settings.proxmox_mock:
         return None
-    if _proxmox is None:
+
+    current_key = (settings.proxmox_host, settings.proxmox_user)
+    if _proxmox is None or _proxmox_key != current_key:
         from proxmoxer import ProxmoxAPI  # type: ignore
+        log.info(
+            "Connecting to Proxmox at %s as %s (verify_ssl=%s)",
+            settings.proxmox_host,
+            settings.proxmox_user,
+            settings.proxmox_verify_ssl,
+        )
         _proxmox = ProxmoxAPI(
             settings.proxmox_host,
             user=settings.proxmox_user,
             password=settings.proxmox_password,
             verify_ssl=settings.proxmox_verify_ssl,
         )
+        _proxmox_key = current_key
+        log.info("Proxmox client initialised (host=%s)", settings.proxmox_host)
     return _proxmox
 
 

@@ -1,15 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
     Modal, Tabs, TextInput, Table, Badge, Alert, Loader, Stack, Group,
-    Text, Button, ActionIcon, Tooltip, SegmentedControl, ThemeIcon,
+    Text, Button, SegmentedControl, ThemeIcon,
     ScrollArea,
 } from '@mantine/core';
 import {
     IconCloud, IconAlertTriangle, IconCheck, IconNetwork,
-    IconSearch, IconLayersLinked,
+    IconSearch, IconLayersLinked, IconCirclePlus,
 } from '@tabler/icons-react';
-import { checkNetBoxStatus, getIPAddresses, getPrefixes, getVlans } from '../api/netbox';
+import { checkNetBoxStatus, getIPAddresses, getPrefixes, getVlans, allocateIP } from '../api/netbox';
+import { notifications } from '@mantine/notifications';
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -38,7 +39,7 @@ function search(rows, q, keys) {
     return rows.filter(r => keys.some(k => String(r[k] ?? '').toLowerCase().includes(lc)));
 }
 
-// ── IP Addresses tab ─────────────────────────────────────────────────────────
+// ── IP Addresses tab (existing IPs) ──────────────────────────────────────────
 
 function IPAddressesTab({ onSelect }) {
     const [q, setQ] = useState('');
@@ -98,7 +99,7 @@ function IPAddressesTab({ onSelect }) {
                             {rows.length === 0 && (
                                 <Table.Tr>
                                     <Table.Td colSpan={6}>
-                                        <Text c="dimmed" fz="xs" ta="center">No addresses found</Text>
+                                        <Text c="dimmed" fz="xs" ta="center">No active addresses found</Text>
                                     </Table.Td>
                                 </Table.Tr>
                             )}
@@ -130,11 +131,12 @@ function IPAddressesTab({ onSelect }) {
     );
 }
 
-// ── Prefixes tab ─────────────────────────────────────────────────────────────
+// ── Prefixes tab (allocate next available) ────────────────────────────────────
 
-function PrefixesTab({ onSelect }) {
+function PrefixesTab({ onSelect, hostname, resourceType }) {
     const [q, setQ] = useState('');
     const [family, setFamily] = useState('both');
+    const [allocating, setAllocating] = useState(null); // prefix id currently being allocated
 
     const params = {
         ...(family !== 'both' ? { family: Number(family) } : {}),
@@ -148,8 +150,39 @@ function PrefixesTab({ onSelect }) {
 
     const rows = search(data, q, ['prefix', 'description', 'site', 'vrf', 'role']);
 
+    const handleAllocate = async (prefix) => {
+        if (!hostname) {
+            notifications.show({
+                color: 'orange',
+                title: 'Hostname required',
+                message: 'Enter a hostname in the Basic Config step before allocating an IP.',
+                autoClose: 5000,
+            });
+            return;
+        }
+        setAllocating(prefix.id);
+        try {
+            const result = await allocateIP(prefix.id, hostname, resourceType);
+            onSelect({ type: 'allocated', data: result });
+        } catch (err) {
+            const msg = err.response?.data?.detail || err.message || 'Allocation failed';
+            notifications.show({ color: 'red', title: 'IP allocation failed', message: msg, autoClose: 10000 });
+        } finally {
+            setAllocating(null);
+        }
+    };
+
     return (
         <Stack gap="sm">
+            <Alert color="blue" variant="light" p="xs">
+                <Text size="xs">
+                    <strong>Allocate Next Available</strong> — automatically reserves the gateway
+                    (.1 / ::1) and network address (::) if not yet in NetBox, then allocates the
+                    next free IP and configures a static address on the NIC.
+                    Hostname: <strong>{hostname || '(not set — enter in Basic Config first)'}</strong>
+                </Text>
+            </Alert>
+
             <Group grow>
                 <TextInput
                     placeholder="Search prefix, site, role…"
@@ -173,13 +206,13 @@ function PrefixesTab({ onSelect }) {
             {isLoading && <Group justify="center" py="md"><Loader size="sm" color="cyan" /></Group>}
 
             {!isLoading && (
-                <ScrollArea h={320}>
+                <ScrollArea h={280}>
                     <Table fz="xs" withRowBorders highlightOnHover>
                         <Table.Thead>
                             <Table.Tr>
                                 <Table.Th>Prefix</Table.Th>
-                                <Table.Th>Gateway</Table.Th>
-                                <Table.Th>DNS Servers</Table.Th>
+                                <Table.Th>Gateway (CF)</Table.Th>
+                                <Table.Th>DNS Servers (CF)</Table.Th>
                                 <Table.Th>Site / VRF</Table.Th>
                                 <Table.Th>Status</Table.Th>
                                 <Table.Th />
@@ -196,7 +229,7 @@ function PrefixesTab({ onSelect }) {
                             {rows.map(p => (
                                 <Table.Tr key={p.id}>
                                     <Table.Td fw={500}>{p.prefix}</Table.Td>
-                                    <Table.Td>{p.gateway || '—'}</Table.Td>
+                                    <Table.Td c="dimmed">{p.gateway || '—'}</Table.Td>
                                     <Table.Td c="dimmed">{p.dns_servers || '—'}</Table.Td>
                                     <Table.Td c="dimmed">
                                         {[p.site, p.vrf].filter(Boolean).join(' / ') || 'global'}
@@ -205,12 +238,18 @@ function PrefixesTab({ onSelect }) {
                                     <Table.Td>
                                         <Button
                                             size="compact-xs"
-                                            color="cyan"
+                                            color="teal"
                                             variant="light"
-                                            leftSection={<IconCheck size={10} />}
-                                            onClick={() => onSelect({ type: 'prefix', data: p })}
+                                            leftSection={
+                                                allocating === p.id
+                                                    ? <Loader size={10} />
+                                                    : <IconCirclePlus size={10} />
+                                            }
+                                            loading={allocating === p.id}
+                                            disabled={allocating !== null}
+                                            onClick={() => handleAllocate(p)}
                                         >
-                                            Use
+                                            Allocate
                                         </Button>
                                     </Table.Td>
                                 </Table.Tr>
@@ -307,32 +346,45 @@ function VlansTab({ onSelect }) {
  * NetBoxNicPicker
  *
  * Props:
- *   opened  {bool}    - modal open state
- *   onClose {fn}      - called when modal should close
- *   onApply {fn}      - called with a NIC patch object to merge into the NIC
- *   nicIndex {number} - which interface this picker is for (display only)
+ *   opened       {bool}           - modal open state
+ *   onClose      {fn}             - called when modal should close
+ *   onApply      {fn}             - called with a NIC patch object to merge into the NIC
+ *   nicIndex     {number}         - which interface this picker is for (display only)
+ *   hostname     {string}         - current hostname from provisioning form (used as dns_name)
+ *   resourceType {'lxc'|'vm'}    - controls NetBox IP status: active for lxc, reserved for vm
  */
-export default function NetBoxNicPicker({ opened, onClose, onApply, nicIndex }) {
+export default function NetBoxNicPicker({ opened, onClose, onApply, nicIndex, hostname = '', resourceType = 'lxc' }) {
     const statusQ = useNetBoxStatus();
     const reachable = statusQ.data?.reachable;
 
+    const [applied, setApplied] = useState(null);
+
     const handleSelect = ({ type, data }) => {
+        let patch = {};
+
         if (type === 'ip') {
-            const isV6 = (data.family === 6);
-            onApply(isV6
-                ? { ip6: data.address, gw6: data.prefix_gateway || '', dns: data.dns_name || '' }
-                : { ip: data.address, gw: data.prefix_gateway || '', dns: data.dns_name || '' }
-            );
-        } else if (type === 'prefix') {
-            const isV6 = (data.family === 6);
-            onApply(isV6
-                ? { ip6: 'auto', gw6: data.gateway || '', dns: data.dns_servers || '' }
-                : { ip: 'dhcp', gw: data.gateway || '', dns: data.dns_servers || '' }
-            );
+            // Pre-existing IP address — use as static
+            const isV6 = Number(data.family) === 6;
+            patch = isV6
+                ? { ip6: data.address, gw6: data.prefix_gateway || '' }
+                : { ip: data.address, gw: data.prefix_gateway || '' };
+            setApplied(data.address);
+
+        } else if (type === 'allocated') {
+            // Freshly allocated from a prefix
+            const isV6 = Number(data.family) === 6;
+            patch = isV6
+                ? { ip6: data.address, gw6: data.gateway || '' }
+                : { ip: data.address, gw: data.gateway || '' };
+            setApplied(`${data.address} (allocated)`);
+
         } else if (type === 'vlan') {
-            onApply({ vlan: data.vid });
+            patch = { vlan: data.vid };
+            setApplied(`VLAN ${data.vid} — ${data.name}`);
         }
-        onClose();
+
+        onApply(patch);
+        setTimeout(() => { setApplied(null); onClose(); }, 700);
     };
 
     return (
@@ -348,12 +400,13 @@ export default function NetBoxNicPicker({ opened, onClose, onApply, nicIndex }) 
                         Populate from NetBox — Interface {nicIndex}
                     </Text>
                     {statusQ.isSuccess && (
-                        <Badge
-                            size="xs"
-                            color={reachable ? 'green' : 'red'}
-                            variant="dot"
-                        >
+                        <Badge size="xs" color={reachable ? 'green' : 'red'} variant="dot">
                             {reachable ? statusQ.data.version : 'unreachable'}
+                        </Badge>
+                    )}
+                    {applied && (
+                        <Badge size="xs" color="teal" variant="filled" leftSection={<IconCheck size={9} />}>
+                            Applied: {applied}
                         </Badge>
                     )}
                 </Group>
@@ -372,36 +425,31 @@ export default function NetBoxNicPicker({ opened, onClose, onApply, nicIndex }) 
             )}
 
             {statusQ.isSuccess && !reachable && (
-                <Alert
-                    color="yellow"
-                    icon={<IconAlertTriangle size={16} />}
-                    title="NetBox unreachable"
-                    mb="sm"
-                >
+                <Alert color="yellow" icon={<IconAlertTriangle size={16} />} title="NetBox unreachable" mb="sm">
                     {statusQ.data?.reason || 'Could not connect to the configured NetBox instance.'}
                     {' '}Check <code>NETBOX_URL</code> and <code>NETBOX_TOKEN</code> in your <code>.env</code>.
                 </Alert>
             )}
 
             {statusQ.isSuccess && reachable && (
-                <Tabs defaultValue="ip" color="cyan">
+                <Tabs defaultValue="prefixes" color="cyan">
                     <Tabs.List mb="sm">
-                        <Tabs.Tab value="ip" leftSection={<IconNetwork size={13} />}>
-                            IP Addresses
+                        <Tabs.Tab value="prefixes" leftSection={<IconCirclePlus size={13} />}>
+                            Allocate from Prefix
                         </Tabs.Tab>
-                        <Tabs.Tab value="prefixes" leftSection={<IconNetwork size={13} />}>
-                            Prefixes
+                        <Tabs.Tab value="ip" leftSection={<IconNetwork size={13} />}>
+                            Use Existing IP
                         </Tabs.Tab>
                         <Tabs.Tab value="vlans" leftSection={<IconLayersLinked size={13} />}>
                             VLANs
                         </Tabs.Tab>
                     </Tabs.List>
 
+                    <Tabs.Panel value="prefixes">
+                        <PrefixesTab onSelect={handleSelect} hostname={hostname} resourceType={resourceType} />
+                    </Tabs.Panel>
                     <Tabs.Panel value="ip">
                         <IPAddressesTab onSelect={handleSelect} />
-                    </Tabs.Panel>
-                    <Tabs.Panel value="prefixes">
-                        <PrefixesTab onSelect={handleSelect} />
                     </Tabs.Panel>
                     <Tabs.Panel value="vlans">
                         <VlansTab onSelect={handleSelect} />

@@ -1,7 +1,10 @@
 """FastAPI router — Proxmox nodes, VMs, containers, networks, storage, task polling."""
 
+import logging
 from typing import Any, Literal
 from fastapi import APIRouter, HTTPException
+
+log = logging.getLogger(__name__)
 
 from api.services.proxmox import client as px_client
 from api.services.proxmox import vms as px_vms
@@ -23,14 +26,21 @@ MOCK_RUNNING_INSTANCES: set[str] = set()
 
 def _proxmox_error(e: Exception) -> str:
     """Extract a readable error message from a proxmoxer or generic exception."""
+    import re
     # proxmoxer wraps HTTP errors — the response body is usually in str(e)
     msg = str(e)
     # Try to pull Proxmox's JSON "errors" or "message" field out if present
-    import re
     m = re.search(r'"errors":\s*(\{[^}]+\})', msg)
     if m:
         return f"Proxmox error: {m.group(1)}"
     return msg
+
+
+def _raise502(e: Exception, context: str = "") -> None:
+    """Log the full exception then raise a 502 so the detail appears in server logs."""
+    detail = _proxmox_error(e)
+    log.error("Proxmox 502%s: %s", f" [{context}]" if context else "", detail, exc_info=True)
+    raise HTTPException(status_code=502, detail=detail)
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +53,7 @@ def get_nodes() -> list[dict[str, Any]]:
     try:
         return px_client.get_nodes()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        _raise502(e, "get_nodes")
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +66,7 @@ def get_networks(node: str) -> list[dict[str, Any]]:
     try:
         return px_net.list_networks(node)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        _raise502(e, f"list_networks/{node}")
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +79,7 @@ def get_storage(node: str) -> list[dict[str, Any]]:
     try:
         return px_stor.list_storage(node)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        _raise502(e, f"list_storage/{node}")
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +144,7 @@ def create_vm(node: str, req: CreateVMRequest) -> dict[str, Any]:
         upid = px_vms.create_vm(node, params)
         return {"upid": upid, "node": node, "vmid": req.vmid}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=_proxmox_error(e))
+        _raise502(e, f"create_vm/{node}/{req.vmid}")
 
 
 @router.post("/nodes/{node}/vms/{vmid}/{action}", status_code=202)
@@ -202,6 +212,11 @@ def create_container(node: str, req: CreateLXCRequest) -> dict[str, Any]:
         "unprivileged": 1 if req.unprivileged else 0,
         "start": 1 if req.start_after_create else 0,
     }
+    # NOTE: ciuser / sshkeys are cloud-init parameters for QEMU VMs only.
+    # LXC containers do NOT support them — Proxmox returns 400 if sent.
+    # The 'password' param above sets the root password for LXC directly.
+    # req.username and req.ssh_key are accepted by the schema for future use
+    # (e.g. post-create user setup) but are intentionally not forwarded here.
     # Attach all NICs (net0, net1, …) and collect DNS
     dns_servers: list[str] = []
     for idx, nic in enumerate(req.nics):
@@ -216,7 +231,7 @@ def create_container(node: str, req: CreateLXCRequest) -> dict[str, Any]:
         upid = px_ct.create_container(node, params)
         return {"upid": upid, "node": node, "vmid": req.vmid}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=_proxmox_error(e))
+        _raise502(e, f"create_lxc/{node}/{req.vmid}")
 
 
 @router.post("/nodes/{node}/lxc/{vmid}/{action}", status_code=202)
@@ -239,7 +254,7 @@ def container_action(
         upid = px_ct.action_container(node, vmid, action)
         return {"upid": upid, "node": node, "vmid": vmid, "action": action}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        _raise502(e, f"container_action/{node}/{vmid}/{action}")
 
 
 # ---------------------------------------------------------------------------
@@ -265,4 +280,4 @@ def get_task(node: str, upid: str) -> dict[str, Any]:
     try:
         return px_vms.get_task_status(node, upid)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        _raise502(e, f"get_task/{node}")
