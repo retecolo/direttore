@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { Box, Text, Stack, ThemeIcon, rem, Tooltip, UnstyledButton } from '@mantine/core';
+import { Box, Text, Stack, ThemeIcon, rem, Tooltip } from '@mantine/core';
 import {
     IconLayoutDashboard,
     IconServer,
@@ -8,10 +8,11 @@ import {
     IconCalendar,
     IconFlask,
     IconCpu,
+    IconNetwork,
 } from '@tabler/icons-react';
 import { useEffect } from 'react';
 
-const NAV = [
+const BASE_NAV = [
     { to: '/dashboard',  label: 'Dashboard',  icon: IconLayoutDashboard },
     { to: '/resources',  label: 'Resources',  icon: IconServer },
     { to: '/provision',  label: 'Provision',  icon: IconRocket },
@@ -20,8 +21,22 @@ const NAV = [
     { to: '/reservations', label: 'Reservations', icon: IconCalendar },
 ];
 
+const CLAB_NAV = { to: '/containerlab', label: 'ContainerLab', icon: IconNetwork };
+
 export default function Layout({ children }) {
     const location = useLocation();
+    const [clabEnabled, setClabEnabled] = useState(false);
+
+    useEffect(() => {
+        fetch('/api/containerlab/status')
+            .then(r => { if (r.ok) return r.json(); throw new Error(); })
+            .then(() => setClabEnabled(true))
+            .catch(() => setClabEnabled(false));
+    }, []);
+
+    const NAV = clabEnabled
+        ? [...BASE_NAV.slice(0, 4), CLAB_NAV, ...BASE_NAV.slice(4)]
+        : BASE_NAV;
 
     return (
         <Box style={{ display: 'flex', minHeight: '100vh', width: '100%', background: 'var(--bg)' }}>

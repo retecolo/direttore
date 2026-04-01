@@ -211,6 +211,25 @@ Health check: **http://localhost:8000/healthz**
 
 ### 4. Frontend setup
 
+If you do not have Node.js and `npm` installed, the recommended and most reliable way to install them (and to avoid architecture or "Illegal instruction" errors) is via [Node Version Manager (nvm)](https://github.com/nvm-sh/nvm):
+
+```bash
+# 1. Install NVM
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+
+# 2. Activate NVM (or restart your terminal)
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+# 3. Install Node.js 20 (LTS)
+nvm install 20
+nvm use 20
+```
+
+> **Note on "Illegal instruction" errors:** If you receive an `Illegal instruction` error when running `npm` or `node`, your CPU might lack the latest instruction sets (like SSE4.1/AVX) required by Node 20+. If you installed using a package manager (e.g. `apt install nsolid` or `snap`), remove those packages (`sudo apt remove nsolid nodejs npm`). Use `nvm` as shown above. If `nvm install 20` still yields "Illegal instruction", fallback to Node 18 by running `nvm install 18 && nvm use 18`.
+
+Then, to install dependencies and run the development server:
+
 ```bash
 cd frontend
 npm install

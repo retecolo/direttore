@@ -10,7 +10,7 @@ export default defineConfig({
     // allowedHosts: 'all' suppresses Vite's host-header check so nginx or
     // any external proxy can forward requests without getting a 403.
     allowedHosts: 'all',
-    host: '0.0.0.0',
+    host: '::',
 
     // Proxy /api/* (and docs) to the FastAPI backend.
     //
