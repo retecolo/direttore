@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { Box, Text, Stack, ThemeIcon, rem, Tooltip } from '@mantine/core';
 import {
     IconLayoutDashboard,
@@ -10,33 +10,50 @@ import {
     IconCpu,
     IconNetwork,
 } from '@tabler/icons-react';
-import { useEffect } from 'react';
-
-const BASE_NAV = [
-    { to: '/dashboard',  label: 'Dashboard',  icon: IconLayoutDashboard },
-    { to: '/resources',  label: 'Resources',  icon: IconServer },
-    { to: '/provision',  label: 'Provision',  icon: IconRocket },
-    { to: '/hardware',   label: 'Hardware',   icon: IconCpu },
-    { to: '/lab',        label: 'Lab',        icon: IconFlask },
-    { to: '/reservations', label: 'Reservations', icon: IconCalendar },
-];
-
-const CLAB_NAV = { to: '/containerlab', label: 'ContainerLab', icon: IconNetwork };
 
 export default function Layout({ children }) {
     const location = useLocation();
+    const navigate = useNavigate();
     const [clabEnabled, setClabEnabled] = useState(false);
+    const [proxmoxEnabled, setProxmoxEnabled] = useState(true);
 
     useEffect(() => {
         fetch('/api/containerlab/status')
             .then(r => { if (r.ok) return r.json(); throw new Error(); })
             .then(() => setClabEnabled(true))
             .catch(() => setClabEnabled(false));
+            
+        fetch('/api/proxmox/status')
+            .then(r => { if (r.ok) return r.json(); throw new Error(); })
+            .then(data => setProxmoxEnabled(data.enabled ?? true))
+            .catch(() => setProxmoxEnabled(true));
     }, []);
 
-    const NAV = clabEnabled
-        ? [...BASE_NAV.slice(0, 4), CLAB_NAV, ...BASE_NAV.slice(4)]
-        : BASE_NAV;
+    useEffect(() => {
+        // Redirect away from proxmox-only views if proxmox is disabled
+        if (!proxmoxEnabled && (location.pathname === '/' || location.pathname === '/dashboard')) {
+            if (clabEnabled) {
+                navigate('/containerlab', { replace: true });
+            } else {
+                navigate('/hardware', { replace: true });
+            }
+        }
+    }, [proxmoxEnabled, clabEnabled, location.pathname, navigate]);
+
+    let NAV = [];
+    if (proxmoxEnabled) {
+        NAV.push({ to: '/dashboard',  label: 'Dashboard',  icon: IconLayoutDashboard });
+        NAV.push({ to: '/resources',  label: 'Resources',  icon: IconServer });
+        NAV.push({ to: '/provision',  label: 'Provision',  icon: IconRocket });
+    }
+    NAV.push({ to: '/hardware',   label: 'Hardware',   icon: IconCpu });
+    if (clabEnabled) {
+        NAV.push({ to: '/containerlab', label: 'ContainerLab', icon: IconNetwork });
+    }
+    if (proxmoxEnabled) {
+        NAV.push({ to: '/lab',        label: 'Lab',        icon: IconFlask });
+    }
+    NAV.push({ to: '/reservations', label: 'Reservations', icon: IconCalendar });
 
     return (
         <Box style={{ display: 'flex', minHeight: '100vh', width: '100%', background: 'var(--bg)' }}>
