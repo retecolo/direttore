@@ -7,9 +7,9 @@ export default defineConfig({
   server: {
     // Bind to all interfaces so the dev server is reachable at the host's
     // real IP (e.g. http://100.x.x.x:5173) without needing the --host CLI flag.
-    // allowedHosts: 'all' suppresses Vite's host-header check so nginx or
+    // allowedHosts: true suppresses Vite's host-header check so nginx or
     // any external proxy can forward requests without getting a 403.
-    allowedHosts: 'all',
+    allowedHosts: true,
     host: '::',
 
     // Proxy /api/* (and docs) to the FastAPI backend.
