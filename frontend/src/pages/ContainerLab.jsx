@@ -15,6 +15,7 @@ import {
   getCLabStatus, listLabs, inspectLab, deployLab, destroyLab,
   listTopologies, getTopology, uploadTopology,
 } from '../api/containerlab';
+import { WorkspaceBrowser } from '../features/topology/WorkspaceBrowser';
 
 // ─── Status badge helper ────────────────────────────────────────────────────
 function ModeBadge({ mode }) {
@@ -27,7 +28,7 @@ function ModeBadge({ mode }) {
 }
 
 // ─── Lab detail drawer ──────────────────────────────────────────────────────
-function LabDrawer({ labName, opened, onClose }) {
+function LabDrawer({ labName, opened, onClose, statusConfig }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ['clab-inspect', labName],
     queryFn: () => inspectLab(labName),
@@ -37,6 +38,19 @@ function LabDrawer({ labName, opened, onClose }) {
   const containers =
     data?.containers ||
     (Array.isArray(data) ? data : []);
+
+  const getShellStr = (ipv4) => {
+    if (!ipv4) return null;
+    const ip = ipv4.split('/')[0];
+    const mode = statusConfig?.mode;
+    const s_host = statusConfig?.ssh_host;
+    const s_user = statusConfig?.ssh_user;
+    
+    // Most containerlab distros use standard users like admin or let root fallback
+    return mode === 'ssh' && s_host
+      ? `ssh -J ${s_user || 'root'}@${s_host} admin@${ip}`
+      : `ssh admin@${ip}`;
+  };
 
   return (
     <Drawer
@@ -67,10 +81,13 @@ function LabDrawer({ labName, opened, onClose }) {
                 <Table.Th>IPv4</Table.Th>
                 <Table.Th>IPv6</Table.Th>
                 <Table.Th>State</Table.Th>
+                <Table.Th>Console</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
-              {containers.map((c, i) => (
+              {containers.map((c, i) => {
+                const shellStr = getShellStr(c.ipv4_address || c.management?.ipv4);
+                return (
                 <Table.Tr key={i}>
                   <Table.Td>{c.name || c.container_name || '—'}</Table.Td>
                   <Table.Td>
@@ -91,11 +108,29 @@ function LabDrawer({ labName, opened, onClose }) {
                       {c.state || '—'}
                     </Badge>
                   </Table.Td>
+                  <Table.Td>
+                    {shellStr ? (
+                      <Tooltip label="Copy SSH Command">
+                        <ActionIcon
+                          variant="light"
+                          size="sm"
+                          color="cyan"
+                          onClick={() => {
+                            navigator.clipboard.writeText(shellStr);
+                            notifications.show({ title: 'Copied', message: shellStr, color: 'blue', autoClose: 2000 });
+                          }}
+                        >
+                          <IconCode size={14} />
+                        </ActionIcon>
+                      </Tooltip>
+                    ) : '—'}
+                  </Table.Td>
                 </Table.Tr>
-              ))}
+                );
+              })}
               {containers.length === 0 && (
                 <Table.Tr>
-                  <Table.Td colSpan={6} ta="center" c="dimmed">No containers found</Table.Td>
+                  <Table.Td colSpan={7} ta="center" c="dimmed">No containers found</Table.Td>
                 </Table.Tr>
               )}
             </Table.Tbody>
@@ -167,8 +202,6 @@ export default function ContainerLab() {
   const [inspectTarget, setInspectTarget] = useState(null);
   const [deployOpen, setDeployOpen] = useState(false);
   const [selectedTopo, setSelectedTopo] = useState(null);
-  const [selectedTopoView, setSelectedTopoView] = useState(null);
-  const [uploadFile, setUploadFile] = useState(null);
 
   const [deployLogs, setDeployLogs] = useState([]);
   const [deployStatus, setDeployStatus] = useState('idle'); // idle, deploying, success, error
@@ -271,12 +304,7 @@ export default function ContainerLab() {
     refetchInterval: 15000,
   });
 
-  const topoQ = useQuery({
-    queryKey: ['clab-topologies'],
-    queryFn: listTopologies,
-  });
-
-  const gitConfigured = topoQ.data?.git_configured ?? false;
+  const gitConfigured = statusQ.data?.features?.git_topologies ?? false;
   const mode = statusQ.data?.mode;
   const statusOk = statusQ.data?.ok;
 
@@ -313,7 +341,7 @@ export default function ContainerLab() {
   const refresh = useCallback(() => {
     qc.invalidateQueries({ queryKey: ['clab-status'] });
     qc.invalidateQueries({ queryKey: ['clab-labs'] });
-    qc.invalidateQueries({ queryKey: ['clab-topologies'] });
+    qc.invalidateQueries({ queryKey: ['clab-ws'] });
   }, [qc]);
 
   // ── Render ──
@@ -346,14 +374,6 @@ export default function ContainerLab() {
               <IconRefresh size={16} />
             </ActionIcon>
           </Tooltip>
-          <Button
-            size="xs"
-            leftSection={<IconPlayerPlay size={14} />}
-            disabled={!statusOk || !topoQ.data?.files?.length}
-            onClick={() => setDeployOpen(true)}
-          >
-            Deploy Lab
-          </Button>
         </Group>
       </Group>
 
@@ -441,94 +461,14 @@ export default function ContainerLab() {
         </Table>
       )}
 
-      {/* Topology Files */}
-      <Group justify="space-between" mb="xs">
-        <Text fw={600} size="sm" c="dimmed" tt="uppercase" style={{ letterSpacing: '0.05em' }}>
-          Topology Files
-          {gitConfigured && (
-            <Badge ml="xs" size="xs" color="grape" variant="light">Git-backed</Badge>
-          )}
-        </Text>
-        <Group gap="xs">
-          <FileInput
-            size="xs"
-            placeholder="Upload .yml"
-            accept=".yml,.yaml"
-            leftSection={<IconUpload size={13} />}
-            value={uploadFile}
-            onChange={setUploadFile}
-            style={{ width: 180 }}
-          />
-          <Button
-            size="xs"
-            variant="light"
-            disabled={!uploadFile}
-            loading={uploadMut.isPending}
-            onClick={() => uploadFile && uploadMut.mutate(uploadFile)}
-          >
-            Upload
-          </Button>
-        </Group>
-      </Group>
-
-      {topoQ.isLoading && <Loader size="sm" />}
-      {!topoQ.isLoading && (
-        <Stack gap={4} mb="xl">
-          {(topoQ.data?.files || []).map((f) => (
-            <Paper
-              key={f}
-              px="md"
-              py="sm"
-              withBorder
-              radius="sm"
-              style={{
-                cursor: 'pointer',
-                borderColor: selectedTopoView === f ? 'var(--mantine-color-cyan-5)' : undefined,
-                background: selectedTopoView === f ? 'rgba(0,188,212,0.05)' : undefined,
-              }}
-              onClick={() => setSelectedTopoView(selectedTopoView === f ? null : f)}
-            >
-              <Group justify="space-between">
-                <Group gap="xs">
-                  <IconCode size={14} color="var(--mantine-color-cyan-5)" />
-                  <Text size="sm" ff="mono">{f}</Text>
-                </Group>
-                <Group gap="xs">
-                  {gitConfigured && (
-                    <Badge size="xs" variant="dot" color="grape">git</Badge>
-                  )}
-                  <Badge
-                    size="xs"
-                    variant="light"
-                    color="teal"
-                    style={{ cursor: 'pointer' }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSelectedTopo(f);
-                      setDeployOpen(true);
-                    }}
-                  >
-                    Deploy
-                  </Badge>
-                </Group>
-              </Group>
-              {selectedTopoView === f && (
-                <Box mt="sm">
-                  <Divider mb="sm" />
-                  <TopoViewer filename={f} gitConfigured={gitConfigured} />
-                </Box>
-              )}
-            </Paper>
-          ))}
-          {(topoQ.data?.files || []).length === 0 && (
-            <Text size="sm" c="dimmed">
-              No topology files found in{' '}
-              <Code>{topoQ.data?.topo_dir || 'CLAB_TOPO_DIR'}</Code>.
-              Upload a .yml file to get started.
-            </Text>
-          )}
-        </Stack>
-      )}
+      {/* Workspace Browser */}
+      <WorkspaceBrowser 
+        gitConfigured={gitConfigured} 
+        onDeploy={(topoPath) => {
+          setSelectedTopo(topoPath);
+          setDeployOpen(true);
+        }} 
+      />
 
       {/* Deploy modal */}
       <Modal
@@ -544,14 +484,7 @@ export default function ContainerLab() {
       >
         <Stack>
           {deployStatus === 'idle' && (
-            <Select
-              label="Topology file"
-              placeholder="Select from CLAB_TOPO_DIR"
-              data={topoQ.data?.files || []}
-              value={selectedTopo}
-              onChange={setSelectedTopo}
-              searchable
-            />
+            <Text size="sm">Deploying topology: <Code>{selectedTopo}</Code></Text>
           )}
 
           {deployStatus !== 'idle' && (
@@ -592,6 +525,7 @@ export default function ContainerLab() {
         labName={inspectTarget}
         opened={!!inspectTarget}
         onClose={() => setInspectTarget(null)}
+        statusConfig={statusQ.data?.features}
       />
     </Box>
   );

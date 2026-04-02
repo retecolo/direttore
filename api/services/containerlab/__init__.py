@@ -455,17 +455,63 @@ def list_topology_files() -> list[str]:
 
 def read_topology_file(filename: str) -> str | None:
     s = _settings()
-    path = Path(s.clab_topo_dir) / filename
-    if not path.is_file():
+    # Safely resolve path to prevent traversal
+    topo_dir = Path(s.clab_topo_dir).resolve()
+    path = (topo_dir / filename).resolve()
+    if topo_dir not in path.parents or not path.is_file():
         return None
-    return path.read_text()
+    try:
+        return path.read_text()
+    except UnicodeDecodeError:
+        return None
 
 
 def write_topology_file(filename: str, content: str) -> None:
     s = _settings()
-    topo_dir = Path(s.clab_topo_dir)
-    topo_dir.mkdir(parents=True, exist_ok=True)
-    (topo_dir / filename).write_text(content)
+    topo_dir = Path(s.clab_topo_dir).resolve()
+    path = (topo_dir / filename).resolve()
+    if topo_dir not in path.parents:
+        raise ValueError("Invalid path")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+
+def delete_topology_file(filename: str) -> bool:
+    s = _settings()
+    topo_dir = Path(s.clab_topo_dir).resolve()
+    path = (topo_dir / filename).resolve()
+    if topo_dir not in path.parents or not path.exists():
+        return False
+    if path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    return True
+
+
+def list_workspace(subpath: str = "") -> list[dict[str, Any]]:
+    """Return a list of files and directories in the workspace."""
+    s = _settings()
+    topo_dir = Path(s.clab_topo_dir).resolve()
+    target = (topo_dir / subpath).resolve()
+    
+    if topo_dir not in target.parents and target != topo_dir:
+        return []
+    if not target.is_dir():
+        return []
+        
+    items = []
+    for f in target.iterdir():
+        if f.name.startswith(".git"):
+            continue
+        rel = f.relative_to(topo_dir)
+        items.append({
+            "name": f.name,
+            "path": str(rel),
+            "is_dir": f.is_dir(),
+            "size": f.stat().st_size if f.is_file() else 0,
+        })
+    return sorted(items, key=lambda x: (not x["is_dir"], x["name"]))
 
 
 # ---------------------------------------------------------------------------

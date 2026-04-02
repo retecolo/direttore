@@ -15,10 +15,16 @@ export const listTopologies       = ()           => axios.get(`${BASE}/topologie
 export const getTopology          = (filename)   => axios.get(`${BASE}/topologies/${encodeURIComponent(filename)}`).then(r => r.data);
 export const getTopologyHistory   = (filename)   => axios.get(`${BASE}/topologies/${encodeURIComponent(filename)}/history`).then(r => r.data);
 
-export const uploadTopology = (file) => {
+export const listWorkspace        = (subpath='') => axios.get(`${BASE}/workspace/${encodeURIComponent(subpath)}`).then(r => r.data);
+export const createFolder         = (path)       => axios.post(`${BASE}/workspace/folder`, { path }).then(r => r.data);
+export const saveWorkspaceFile    = (path, content) => axios.post(`${BASE}/workspace/file`, { path, content }).then(r => r.data);
+export const deleteWorkspaceFile  = (path)       => axios.delete(`${BASE}/workspace/file`, { params: { path } }).then(r => r.data);
+
+export const uploadTopology = (file, path='') => {
   const fd = new FormData();
   fd.append('file', file);
   return axios.post(`${BASE}/topologies`, fd, {
+    params: { path },
     headers: { 'Content-Type': 'multipart/form-data' },
   }).then(r => r.data);
 };
