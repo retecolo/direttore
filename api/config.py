@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     proxmox_password: str = "changeme"
     proxmox_verify_ssl: bool = False
     proxmox_mock: bool = False  # Set to true for dev without a real Proxmox host
+    proxmox_enabled: bool = True # Set to false to entirely hide proxmox features
 
     # NetBox
     netbox_url: str = "http://localhost:8000"

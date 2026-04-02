@@ -19,6 +19,11 @@ from api.config import settings
 
 router = APIRouter(prefix="/api/proxmox", tags=["proxmox"])
 
+@router.get("/status")
+def get_status() -> dict[str, Any]:
+    """Check if Proxmox features are enabled by configuration."""
+    return {"enabled": settings.proxmox_enabled}
+
 # In-memory track of instances that we are pretending are running
 # because nested virtualization fails in the Docker mock environment
 MOCK_RUNNING_INSTANCES: set[str] = set()
