@@ -119,14 +119,26 @@ async def local_list_labs() -> list[dict[str, Any]]:
     return []
 
 
-async def local_inspect_lab(name: str) -> dict[str, Any]:
+async def local_inspect_lab(name: str) -> list[dict[str, Any]]:
     rc, out, err = await _local_run(["inspect", "--name", name, "--format", "json"])
     if rc != 0:
         raise RuntimeError(f"clab inspect --name {name} failed: {err.strip() or out.strip()}")
     try:
-        return json.loads(out)
+        data = json.loads(out)
     except json.JSONDecodeError:
-        return {"raw": out}
+        return []
+        
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        if "containers" in data:
+            return data["containers"]
+        containers = []
+        for k, v in data.items():
+            if isinstance(v, list):
+                containers.extend(v)
+        return containers
+    return []
 
 
 async def local_deploy(topo_file: str) -> dict[str, Any]:
@@ -260,14 +272,26 @@ async def ssh_list_labs() -> list[dict[str, Any]]:
     return []
 
 
-async def ssh_inspect_lab(name: str) -> dict[str, Any]:
+async def ssh_inspect_lab(name: str) -> list[dict[str, Any]]:
     rc, out, err = await _ssh_run(["inspect", "--name", name, "--format", "json"])
     if rc != 0:
         raise RuntimeError(f"clab ssh inspect --name {name} failed: {err.strip() or out.strip()}")
     try:
-        return json.loads(out)
+        data = json.loads(out)
     except json.JSONDecodeError:
-        return {"raw": out}
+        return []
+
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        if "containers" in data:
+            return data["containers"]
+        containers = []
+        for k, v in data.items():
+            if isinstance(v, list):
+                containers.extend(v)
+        return containers
+    return []
 
 
 async def ssh_deploy(topo_file: str) -> dict[str, Any]:
