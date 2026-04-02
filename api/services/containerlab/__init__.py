@@ -129,6 +129,36 @@ async def local_deploy(topo_file: str) -> dict[str, Any]:
     return {"deployed": True, "output": out, "topo_file": topo_file}
 
 
+async def local_deploy_stream(topo_file: str):
+    s = _settings()
+    path = str(_topo_path(topo_file))
+    
+    cmd = [s.clab_binary, "deploy", "--topo", path, "--reconfigure"]
+    log.debug("clab local stream: %s", " ".join(cmd))
+    
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT
+    )
+    
+    if proc.stdout is None:
+        yield {"type": "error", "message": "Failed to create subprocess pipe"}
+        return
+        
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break
+        yield {"type": "log", "line": line.decode(errors='replace')}
+        
+    rc = await proc.wait()
+    if rc != 0:
+        yield {"type": "error", "message": f"Deployment failed with exit code {rc}"}
+    else:
+        yield {"type": "success", "message": "Deployed successfully"}
+
+
 async def local_destroy(lab_name: str) -> dict[str, Any]:
     rc, out, err = await _local_run(["destroy", "--name", lab_name])
     if rc != 0:
@@ -234,6 +264,51 @@ async def ssh_deploy(topo_file: str) -> dict[str, Any]:
     return {"deployed": True, "output": out, "topo_file": topo_file}
 
 
+async def ssh_deploy_stream(topo_file: str):
+    s = _settings()
+    path = str(Path(s.clab_topo_dir) / topo_file)
+    cmd = " ".join([s.clab_binary, "deploy", "--topo", path, "--reconfigure"])
+    
+    client = await asyncio.to_thread(_ssh_client)
+    try:
+        _, stdout_f, stderr_f = client.exec_command(cmd, get_pty=True)
+        q = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        
+        def reader():
+            try:
+                for line in iter(stdout_f.readline, ""):
+                    loop.call_soon_threadsafe(q.put_nowait, line)
+                rc = stdout_f.channel.recv_exit_status()
+                loop.call_soon_threadsafe(q.put_nowait, ("exit", rc))
+            except Exception as e:
+                loop.call_soon_threadsafe(q.put_nowait, ("error", str(e)))
+
+        import threading
+        t = threading.Thread(target=reader)
+        t.start()
+        
+        while True:
+            item = await q.get()
+            if isinstance(item, tuple):
+                if item[0] == "exit":
+                    rc = item[1]
+                    if rc != 0:
+                        yield {"type": "error", "message": f"Exit code {rc}"}
+                    else:
+                        yield {"type": "success", "message": "Deployed successfully"}
+                    break
+                elif item[0] == "error":
+                    yield {"type": "error", "message": item[1]}
+                    break
+            else:
+                yield {"type": "log", "line": item}
+                
+        await asyncio.to_thread(t.join)
+    finally:
+        client.close()
+
+
 async def ssh_destroy(lab_name: str) -> dict[str, Any]:
     rc, out, err = await _ssh_run(["destroy", "--name", lab_name])
     if rc != 0:
@@ -301,6 +376,15 @@ async def rest_deploy(topo_file: str) -> dict[str, Any]:
         )
     r.raise_for_status()
     return r.json()
+
+
+async def rest_deploy_stream(topo_file: str):
+    try:
+        res = await rest_deploy(topo_file)
+        yield {"type": "log", "line": res.get("output", "Successfully communicated with REST API.\n")}
+        yield {"type": "success", "message": "Deployed successfully"}
+    except Exception as exc:
+        yield {"type": "error", "message": str(exc)}
 
 
 async def rest_destroy(lab_name: str) -> dict[str, Any]:
@@ -425,6 +509,21 @@ async def deploy(topo_file: str) -> dict[str, Any]:
     if m == "rest":
         return await rest_deploy(topo_file)
     raise RuntimeError(f"Unknown CLAB_MODE: {m}")
+
+
+async def deploy_stream(topo_file: str):
+    m = _mode()
+    if m == "local":
+        async for chunk in local_deploy_stream(topo_file):
+            yield chunk
+    elif m == "ssh":
+        async for chunk in ssh_deploy_stream(topo_file):
+            yield chunk
+    elif m == "rest":
+        async for chunk in rest_deploy_stream(topo_file):
+            yield chunk
+    else:
+        yield {"type": "error", "message": f"Unknown CLAB_MODE: {m}"}
 
 
 async def destroy(lab_name: str) -> dict[str, Any]:

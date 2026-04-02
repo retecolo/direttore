@@ -7,7 +7,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import json
 from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.config import settings
@@ -85,6 +87,23 @@ async def deploy_lab(req: DeployRequest) -> dict[str, Any]:
         return await clab.deploy(req.topo_file)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/labs/deploy-stream")
+async def deploy_lab_stream(req: DeployRequest) -> StreamingResponse:
+    """Deploy a containerlab topology and stream the output back via SSE."""
+    _require_clab()
+    if "/" in req.topo_file or ".." in req.topo_file:
+        raise HTTPException(status_code=400, detail="topo_file must be a plain filename, not a path")
+        
+    async def event_generator():
+        try:
+            async for chunk in clab.deploy_stream(req.topo_file):
+                yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.delete("/labs/{name}")

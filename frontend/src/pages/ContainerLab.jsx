@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Text, Badge, Group, Stack, Table, Button, Loader, Alert,
@@ -169,6 +169,94 @@ export default function ContainerLab() {
   const [selectedTopo, setSelectedTopo] = useState(null);
   const [selectedTopoView, setSelectedTopoView] = useState(null);
   const [uploadFile, setUploadFile] = useState(null);
+
+  const [deployLogs, setDeployLogs] = useState([]);
+  const [deployStatus, setDeployStatus] = useState('idle'); // idle, deploying, success, error
+  const logsEndRef = useRef(null);
+
+  useEffect(() => {
+    if (deployOpen && logsEndRef.current) {
+        logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [deployLogs, deployOpen]);
+
+  const deployWithStreaming = async () => {
+    setDeployStatus('deploying');
+    setDeployLogs([]);
+    let currentStatus = 'deploying';
+    
+    try {
+        const res = await fetch('/api/containerlab/labs/deploy-stream', {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify({ topo_file: selectedTopo })
+        });
+        
+        if (!res.ok || !res.body) {
+           currentStatus = 'error';
+           setDeployStatus('error');
+           const text = await res.text();
+           setDeployLogs(prev => [...prev, `[HTTP Error] ${res.status} ${res.statusText}: ${text}`]);
+           return;
+        }
+        
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        
+        while(true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            
+            const parts = buffer.split('\n\n');
+            buffer = parts.pop() || ''; 
+            
+            for (const part of parts) {
+                 if (part.startsWith('data: ')) {
+                      const dataStr = part.substring(6);
+                      try {
+                          const event = JSON.parse(dataStr);
+                          if (event.type === 'log') {
+                              setDeployLogs(prev => [...prev, event.line]);
+                          } else if (event.type === 'error') {
+                              currentStatus = 'error';
+                              setDeployStatus('error');
+                              setDeployLogs(prev => [...prev, `[ERROR] ${event.message}`]);
+                          } else if (event.type === 'success') {
+                              currentStatus = 'success';
+                              setDeployStatus('success');
+                              setDeployLogs(prev => [...prev, `\n\n[SUCCESS] ${event.message}`]);
+                          }
+                      } catch (e) {
+                          setDeployLogs(prev => [...prev, `[Parse Error] ${e.message} on payload: ${dataStr}`]);
+                      }
+                 }
+            }
+        }
+        
+        if (currentStatus === 'deploying') {
+            currentStatus = 'success';
+            setDeployStatus('success');
+            setDeployLogs(prev => [...prev, `[INFO] Stream ended.`]);
+        }
+    } catch (exc) {
+        currentStatus = 'error';
+        setDeployStatus('error');
+        setDeployLogs(prev => [...prev, `[Network Error] ${exc.message}`]);
+    }
+    
+    qc.invalidateQueries({ queryKey: ['clab-labs'] });
+    
+    if (currentStatus === 'success') {
+        setTimeout(() => {
+             setDeployOpen(false);
+             setDeployStatus('idle');
+             setDeployLogs([]);
+             setSelectedTopo(null);
+        }, 5000);
+    }
+  };
 
   // ── Queries ──
   const statusQ = useQuery({
@@ -445,33 +533,57 @@ export default function ContainerLab() {
       {/* Deploy modal */}
       <Modal
         opened={deployOpen}
-        onClose={() => { setDeployOpen(false); setSelectedTopo(null); }}
+        onClose={() => { setDeployOpen(false); setSelectedTopo(null); setDeployStatus('idle'); setDeployLogs([]); }}
         title={
           <Group gap="xs">
             <IconPlayerPlay size={16} />
             <Text fw={600}>Deploy Lab</Text>
           </Group>
         }
-        size="sm"
+        size={deployStatus !== 'idle' ? 'lg' : 'sm'}
       >
         <Stack>
-          <Select
-            label="Topology file"
-            placeholder="Select from CLAB_TOPO_DIR"
-            data={topoQ.data?.files || []}
-            value={selectedTopo}
-            onChange={setSelectedTopo}
-            searchable
-          />
-          <Button
-            fullWidth
-            loading={deployMut.isPending}
-            disabled={!selectedTopo}
-            leftSection={<IconCheck size={14} />}
-            onClick={() => selectedTopo && deployMut.mutate(selectedTopo)}
-          >
-            Deploy
-          </Button>
+          {deployStatus === 'idle' && (
+            <Select
+              label="Topology file"
+              placeholder="Select from CLAB_TOPO_DIR"
+              data={topoQ.data?.files || []}
+              value={selectedTopo}
+              onChange={setSelectedTopo}
+              searchable
+            />
+          )}
+
+          {deployStatus !== 'idle' && (
+            <ScrollArea h={350} bg="#0e0e0e" p="sm" style={{ borderRadius: 6 }}>
+              {deployLogs.length === 0 ? (
+                <Text size="xs" c="dimmed" ff="mono">Starting deployment stream...</Text>
+              ) : (
+                deployLogs.map((log, idx) => (
+                  <Text key={idx} size="xs" c="#00ff00" ff="mono" style={{ whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+                    {log}
+                  </Text>
+                ))
+              )}
+              <div ref={logsEndRef} />
+            </ScrollArea>
+          )}
+
+          {deployStatus === 'idle' && (
+            <Button
+              fullWidth
+              disabled={!selectedTopo}
+              leftSection={<IconCheck size={14} />}
+              onClick={deployWithStreaming}
+            >
+              Deploy
+            </Button>
+          )}
+          {deployStatus === 'error' && (
+            <Button color="gray" fullWidth onClick={() => { setDeployStatus('idle'); setDeployLogs([]); }}>
+              Retry
+            </Button>
+          )}
         </Stack>
       </Modal>
 
