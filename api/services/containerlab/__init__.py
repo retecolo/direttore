@@ -95,7 +95,15 @@ async def local_list_labs() -> list[dict[str, Any]]:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        containers = data.get("containers") or []
+        if "containers" in data:
+            containers = data["containers"]
+        else:
+            # ContainerLab 0.74+ returns {"lab-name": [container, container]}
+            containers = []
+            for k, v in data.items():
+                if isinstance(v, list):
+                    containers.extend(v)
+                    
         # Group containers by lab name
         labs: dict[str, dict] = {}
         for c in containers:
@@ -234,7 +242,14 @@ async def ssh_list_labs() -> list[dict[str, Any]]:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        containers = data.get("containers") or []
+        if "containers" in data:
+            containers = data["containers"]
+        else:
+            containers = []
+            for k, v in data.items():
+                if isinstance(v, list):
+                    containers.extend(v)
+                    
         labs: dict[str, dict] = {}
         for c in containers:
             name = c.get("lab_name") or c.get("labName") or "unknown"
