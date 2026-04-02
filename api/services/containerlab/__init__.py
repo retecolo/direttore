@@ -119,26 +119,26 @@ async def local_list_labs() -> list[dict[str, Any]]:
     return []
 
 
-async def local_inspect_lab(name: str) -> list[dict[str, Any]]:
+async def local_inspect_lab(name: str) -> dict[str, Any]:
     rc, out, err = await _local_run(["inspect", "--name", name, "--format", "json"])
     if rc != 0:
         raise RuntimeError(f"clab inspect --name {name} failed: {err.strip() or out.strip()}")
     try:
         data = json.loads(out)
     except json.JSONDecodeError:
-        return []
+        return {"containers": [], "raw": out}
         
     if isinstance(data, list):
-        return data
+        return {"containers": data}
     if isinstance(data, dict):
         if "containers" in data:
-            return data["containers"]
+            return {"containers": data["containers"]}
         containers = []
         for k, v in data.items():
             if isinstance(v, list):
                 containers.extend(v)
-        return containers
-    return []
+        return {"containers": containers}
+    return {"containers": []}
 
 
 async def local_deploy(topo_file: str) -> dict[str, Any]:
@@ -272,26 +272,26 @@ async def ssh_list_labs() -> list[dict[str, Any]]:
     return []
 
 
-async def ssh_inspect_lab(name: str) -> list[dict[str, Any]]:
+async def ssh_inspect_lab(name: str) -> dict[str, Any]:
     rc, out, err = await _ssh_run(["inspect", "--name", name, "--format", "json"])
     if rc != 0:
         raise RuntimeError(f"clab ssh inspect --name {name} failed: {err.strip() or out.strip()}")
     try:
         data = json.loads(out)
     except json.JSONDecodeError:
-        return []
+        return {"containers": [], "raw": out}
 
     if isinstance(data, list):
-        return data
+        return {"containers": data}
     if isinstance(data, dict):
         if "containers" in data:
-            return data["containers"]
+            return {"containers": data["containers"]}
         containers = []
         for k, v in data.items():
             if isinstance(v, list):
                 containers.extend(v)
-        return containers
-    return []
+        return {"containers": containers}
+    return {"containers": []}
 
 
 async def ssh_deploy(topo_file: str) -> dict[str, Any]:
