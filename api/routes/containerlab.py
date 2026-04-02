@@ -58,6 +58,7 @@ async def list_labs() -> list[dict[str, Any]]:
     try:
         return await clab.list_labs()
     except Exception as exc:
+        log.exception("Error in list_labs:")
         raise HTTPException(status_code=500, detail=str(exc))
 
 
