@@ -86,7 +86,7 @@ async def local_list_labs() -> list[dict[str, Any]]:
         err_lower = out.lower() + err.lower()
         if "no labs found" in err_lower or "no containers found" in err_lower:
             return []
-        raise RuntimeError(f"clab inspect failed: {err.strip() or out.strip()}")
+        raise RuntimeError(f"clab inspect failed (code {rc}): stdout='{out.strip()}' stderr='{err.strip()}'")
     try:
         data = json.loads(out)
     except json.JSONDecodeError:
