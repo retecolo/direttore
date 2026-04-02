@@ -1,32 +1,33 @@
 # Direttore — Lab Infrastructure Management Platform
 
-A vendor-agnostic network and compute lab automation platform combining **NetBox** inventory, **Nornir** network device configuration, and a modern **React + FastAPI** web interface for provisioning and reserving Proxmox VMs and LXC containers — and managing physical network hardware via **Unimus Pro** and **Git**.
+A vendor-agnostic network and compute lab automation platform combining **NetBox** inventory, **Nornir** network device configuration, and a modern **React + FastAPI** web interface for provisioning and reserving Proxmox VMs and LXC containers, managing physical network hardware via **Unimus Pro** and **Git**, and orchestrating virtual network labs with **ContainerLab**.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       React Frontend (Vite 7)                       │
-│  Dashboard · Resources · Provision Wizard · Hardware · Lab ·        │
-│  Reservation Calendar                                               │
-└──────────────┬──────────────────────────────────────┬──────────────┘
-               │ REST API                              │
-┌──────────────▼──────────────────────────────────────▼──────────────┐
-│                     FastAPI Backend (api/)                          │
-├──────────────┬───────────────┬────────────────┬─────────────────────┤
-│  Proxmox     │  Reservations │  NetBox Proxy  │  Hardware Mgmt      │
-│  (proxmoxer) │  (SQLAlchemy) │  (httpx)       │  (Unimus Pro + Git) │
-│  services/   │  models.py    │  services/     │  services/unimus/   │
-│  proxmox/    │               │  netbox/       │  services/git_cfg/  │
-└──────────────┴───────────────┴────────────────┴─────────────────────┘
-        │                          │                      │
-  Proxmox VE API             NetBox API            Unimus Pro API
-  (QEMU VMs + LXC)       (Device inventory)      (Config backup/push)
-                                                         │
-                                                  Git HTTPS + PAT
-                                               (Config archive repo)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          React Frontend (Vite 7)                             │
+│  Dashboard · Resources · Provision Wizard · Hardware · ContainerLab ·        │
+│  Lab Topology · Reservation Calendar                                         │
+└──────────────┬────────────────────────────────────────────┬─────────────────┘
+               │ REST API                                   │
+┌──────────────▼────────────────────────────────────────────▼─────────────────┐
+│                          FastAPI Backend (api/)                              │
+├──────────────┬───────────────┬────────────────┬────────────┬────────────────┤
+│  Proxmox     │  Reservations │  NetBox Proxy  │  Hardware  │  ContainerLab  │
+│  (proxmoxer) │  (SQLAlchemy) │  (httpx)       │  (Unimus + │  (local/SSH/   │
+│  services/   │  models.py    │  services/     │   Git)     │   REST API)    │
+│  proxmox/    │               │  netbox/       │            │  services/     │
+│              │               │                │            │  containerlab/ │
+└──────────────┴───────────────┴────────────────┴────────────┴────────────────┘
+        │                          │                  │              │
+  Proxmox VE API             NetBox API          Unimus Pro    clab binary /
+  (QEMU VMs + LXC)       (Device inventory)   (Config backup)  SSH / REST API
+                                                    │
+                                             Git HTTPS + PAT
+                                          (Config + topology repos)
 ```
 
 ---
@@ -82,6 +83,25 @@ Manage physical network devices (routers, switches, firewalls) that are register
   - **Provision** — push a "golden config" to the live device via Unimus Pro; choose source of truth (Git or Unimus latest backup); Git source lets you pick any historical commit
 - **Status badges** (header) — real-time reachability indicators for Unimus (shows device count) and Git repo (shows configured branch)
 - **Integration warnings** — actionable alerts when `UNIMUS_URL` or `GIT_CONFIG_REPO` are not configured
+
+### ContainerLab
+Orchestrate virtual network topologies powered by [ContainerLab](https://containerlab.dev). The page is **hidden from the sidebar unless `CLAB_MODE` is set** in `.env`. Three backends are supported:
+
+| Mode | How it works |
+|---|---|
+| `local` | Calls the `clab` binary directly on the Direttore host. The process user must be a member of the `clab_admins` group. |
+| `ssh` | Connects via SSH (using `paramiko`) to a remote host running ContainerLab. |
+| `rest` | Calls the [clab-api-server](https://github.com/srl-labs/clab-api-server) HTTP REST API on a remote host. |
+
+Page features:
+- **Status badge** — shows backend mode (local / ssh / rest) and live reachability
+- **Running labs table** — name, node count, topology path; click any row to open the lab detail drawer
+- **Lab detail drawer** — per-node table with kind, image, IPv4/IPv6, and state
+- **Deploy modal** — pick a topology file from `CLAB_TOPO_DIR` and deploy with one click
+- **Topology browser** — lists all `.yml` files in `CLAB_TOPO_DIR`; click to expand inline YAML viewer
+  - **Git history tab** — per-file commit log shown when `CLAB_TOPO_GIT_REPO` is configured
+- **Topology upload** — drag-and-drop or file-picker upload of `.yml` topology files to the server
+- All sub-features (Git history tab, SSH/REST indicators) are hidden when their respective env vars are not set
 
 #### Unimus connectivity notes
 
@@ -161,9 +181,13 @@ When a backup or provision is triggered, Direttore searches for the Unimus devic
 
 - **Python 3.13+** (backend)
 - **[uv](https://docs.astral.sh/uv/)** — fast Python package manager (replaces pip/venv)
-- **Node.js 20+** (frontend)
+- **Node.js 20.19+** (frontend — see install guide below)
 - A Proxmox VE host, **or** use `PROXMOX_MOCK=true` for development without hardware
 - NetBox instance (optional — only needed for the inventory proxy routes and NetBox NIC picker)
+- **ContainerLab** (optional — only needed for the ContainerLab management page)
+
+> [!IMPORTANT]
+> Node.js **20.19+** is required by Vite 7. The system `apt` packages on Debian/Ubuntu are often too old, and binaries compiled for newer microarchitectures can produce `Illegal instruction` crashes on older or virtualized CPUs. **Use `nvm` to install Node** — it compiles a native binary that matches your CPU.
 
 ---
 
@@ -211,6 +235,25 @@ Health check: **http://localhost:8000/healthz**
 
 ### 4. Frontend setup
 
+If you do not have Node.js and `npm` installed, the recommended and most reliable way to install them (and to avoid architecture or "Illegal instruction" errors) is via [Node Version Manager (nvm)](https://github.com/nvm-sh/nvm):
+
+```bash
+# 1. Install NVM
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+
+# 2. Activate NVM (or restart your terminal)
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+# 3. Install Node.js 20 (LTS)
+nvm install 20
+nvm use 20
+```
+
+> **Note on "Illegal instruction" errors:** If you receive an `Illegal instruction` error when running `npm` or `node`, your CPU might lack the latest instruction sets (like SSE4.1/AVX) required by Node 20+. If you installed using a package manager (e.g. `apt install nsolid` or `snap`), remove those packages (`sudo apt remove nsolid nodejs npm`). Use `nvm` as shown above. If `nvm install 20` still yields "Illegal instruction", fallback to Node 18 by running `nvm install 18 && nvm use 18`.
+
+Then, to install dependencies and run the development server:
+
 ```bash
 cd frontend
 npm install
@@ -234,6 +277,8 @@ The Vite dev server also proxies the following paths directly to the FastAPI bac
 
 ## Environment Variables
 
+### Core
+
 | Variable | Default | Description |
 |---|---|---|
 | `PROXMOX_HOST` | `192.168.1.100` | Proxmox VE hostname or IP |
@@ -245,6 +290,11 @@ The Vite dev server also proxies the following paths directly to the FastAPI bac
 | `NETBOX_TOKEN` | — | NetBox API token |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./direttore.db` | SQLAlchemy async DB URL |
 | `API_CORS_ORIGINS` | `http://localhost:5173,http://localhost:3000` | Comma-separated allowed CORS origins |
+
+### Hardware Management (Unimus + Git)
+
+| Variable | Default | Description |
+|---|---|---|
 | **`UNIMUS_URL`** | — | Unimus base URL — e.g. `https://unimus.example.com` or `https://[2001:db8::10]` for IPv6 hosts |
 | **`UNIMUS_TOKEN`** | — | Unimus API Bearer token (Settings → Security → API access tokens) |
 | **`GIT_CONFIG_REPO`** | — | HTTPS clone URL of the config archive repo (e.g. `https://github.com/org/configs.git`) |
@@ -253,6 +303,30 @@ The Vite dev server also proxies the following paths directly to the FastAPI bac
 | **`GIT_CONFIG_LOCAL_PATH`** | `/opt/direttore/config-repo` | Local clone path on the server |
 | **`GIT_CONFIG_AUTHOR_NAME`** | `Direttore` | Git commit author name |
 | **`GIT_CONFIG_AUTHOR_EMAIL`** | `direttore@localhost` | Git commit author email |
+
+### ContainerLab
+
+Leave `CLAB_MODE` empty (or omit it) to hide the ContainerLab page entirely.
+
+| Variable | Default | Description |
+|---|---|---|
+| **`CLAB_MODE`** | _(empty — hidden)_ | Backend mode: `local` \| `ssh` \| `rest` |
+| `CLAB_BINARY` | `clab` | Path to the `clab` binary (local mode) |
+| `CLAB_TOPO_DIR` | `/opt/direttore/topologies` | Directory where topology `.yml` files are stored |
+| `CLAB_SSH_HOST` | — | Hostname/IP of remote clab host (ssh mode) |
+| `CLAB_SSH_PORT` | `22` | SSH port (ssh mode) |
+| `CLAB_SSH_USER` | `root` | SSH username (ssh mode) |
+| `CLAB_SSH_KEY_PATH` | — | Path to SSH private key file (ssh mode) |
+| `CLAB_SSH_PASSWORD` | — | SSH password fallback — prefer key auth (ssh mode) |
+| `CLAB_API_URL` | — | Base URL of the clab-api-server (rest mode), e.g. `https://clab-host:8080` |
+| `CLAB_API_TOKEN` | — | Bearer token for clab-api-server auth (rest mode) |
+| `CLAB_API_USERNAME` | — | HTTP Basic username for clab-api-server (rest mode) |
+| `CLAB_API_PASSWORD` | — | HTTP Basic password for clab-api-server (rest mode) |
+| `CLAB_API_VERIFY_SSL` | `true` | Verify TLS for clab-api-server (rest mode) |
+| `CLAB_TOPO_GIT_REPO` | — | HTTPS clone URL for topology Git backing (any mode) |
+| `CLAB_TOPO_GIT_BRANCH` | `main` | Branch for topology Git repo |
+| `CLAB_TOPO_GIT_AUTH_TOKEN` | — | PAT for topology Git repo HTTPS push |
+| `CLAB_TOPO_GIT_LOCAL_PATH` | `/opt/direttore/clab-topologies` | Local clone path for topology Git repo |
 
 ---
 
@@ -397,6 +471,25 @@ The Vite dev server also proxies the following paths directly to the FastAPI bac
 > [!WARNING]
 > Provisioning pushes a config to a **live device** via Unimus Pro. Always verify the selected config in the Config History tab before provisioning.
 
+---
+
+## ContainerLab API Reference
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/containerlab/status` | Backend reachability check; returns mode, version, and configured features |
+| `GET` | `/api/containerlab/labs` | List all running labs (`clab inspect --all`) |
+| `GET` | `/api/containerlab/labs/{name}` | Inspect a specific lab — returns per-node detail |
+| `POST` | `/api/containerlab/labs` | Deploy a topology (`{"topo_file": "example.yml"}`) |
+| `DELETE` | `/api/containerlab/labs/{name}` | Destroy a running lab |
+| `GET` | `/api/containerlab/topologies` | List `.yml` topology files in `CLAB_TOPO_DIR` |
+| `GET` | `/api/containerlab/topologies/{filename}` | Return raw YAML + optional Git history for a topology file |
+| `POST` | `/api/containerlab/topologies` | Upload a new topology file (`multipart/form-data`) |
+| `GET` | `/api/containerlab/topologies/{filename}/history` | Git commit history for a topology file (requires `CLAB_TOPO_GIT_REPO`) |
+
+> [!NOTE]
+> All `/api/containerlab/*` endpoints return **HTTP 503** if `CLAB_MODE` is not set. The sidebar nav item is also hidden client-side until the status endpoint returns 200.
+
 
 ## nginx Reverse Proxy
 
@@ -537,13 +630,16 @@ direttore/
 │   │   ├── netbox/               # NetBox API client + IPAM allocation
 │   │   ├── unimus/               # Unimus Pro REST API client
 │   │   │   └── __init__.py       #   backup/poll/push, _unwrap normalizer
-│   │   └── git_config/           # Git config archive service
-│   │       └── __init__.py       #   clone/pull/read/write/push
+│   │   ├── git_config/           # Git config archive service
+│   │   │   └── __init__.py       #   clone/pull/read/write/push
+│   │   └── containerlab/         # ContainerLab service (local/SSH/REST backends)
+│   │       └── __init__.py       #   deploy/destroy/inspect/topology CRUD
 │   ├── routes/                   # FastAPI routers
 │   │   ├── proxmox.py            # /api/proxmox/* routes
 │   │   ├── reservations.py       # /api/reservations/* routes
 │   │   ├── inventory.py          # /api/inventory/* routes
-│   │   └── hardware.py           # /api/hardware/* routes (new)
+│   │   ├── hardware.py           # /api/hardware/* routes
+│   │   └── containerlab.py       # /api/containerlab/* routes
 │   └── scripts/                  # Dev / ops helper scripts
 │       ├── init_proxmox_node.sh  # Bootstrap Proxmox Docker container
 │       └── seed_test_resources.sh
@@ -551,7 +647,8 @@ direttore/
 │   ├── src/
 │   │   ├── api/                  # Axios client + typed API functions
 │   │   │   ├── client.js         # Axios base instance
-│   │   │   ├── hardware.js       # Hardware management calls (new)
+│   │   │   ├── hardware.js       # Hardware management calls
+│   │   │   ├── containerlab.js   # ContainerLab API calls
 │   │   │   └── ...               # Other API modules
 │   │   ├── components/
 │   │   │   ├── Layout.jsx        # Sidebar navigation
@@ -563,7 +660,8 @@ direttore/
 │   │       ├── Dashboard.jsx     # Node cards + resource bars
 │   │       ├── Resources.jsx     # VM/CT table with actions
 │   │       ├── Provision.jsx     # Provision wizard wrapper
-│   │       ├── Hardware.jsx      # Physical device management (new)
+│   │       ├── Hardware.jsx      # Physical device management
+│   │       ├── ContainerLab.jsx  # ContainerLab topology management
 │   │       ├── Lab.jsx           # React Flow topology canvas
 │   │       └── Reservations.jsx  # FullCalendar + booking modal
 │   ├── vite.config.js
@@ -654,6 +752,8 @@ uv run python nornir_automation/generate_and_push.py
 | Unimus device-address auto-match (4-strategy: IP→rDNS→name→scan) | ✅ Done | — |
 | Manual Unimus device link store (DNS-free pairing) | ✅ Done | — |
 | Unimus 2.8 backup endpoint auto-detection | ✅ Done | — |
+| ContainerLab integration — local, SSH, REST backends | ✅ Done | — |
+| ContainerLab topology Git backing + history | ✅ Done | — |
 | Real-time VM console (xterm.js + WebSocket) | Planned | 15 hrs |
 | Snapshot management UI | Planned | 5 hrs |
 | Prometheus metrics endpoint | Planned | 8 hrs |
@@ -661,6 +761,7 @@ uv run python nornir_automation/generate_and_push.py
 | YANG config validation | Planned | 5 hrs |
 | SSH-based direct backup (NAPALM/Netmiko, no Unimus) | Planned | 8 hrs |
 | Config diff viewer in Hardware History tab | Planned | 3 hrs |
+| ContainerLab — clab-api-server auth in UI | Planned | 2 hrs |
 
 ---
 

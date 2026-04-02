@@ -44,6 +44,35 @@ class Settings(BaseSettings):
     git_config_author_name: str = "Direttore"
     git_config_author_email: str = "direttore@localhost"
 
+    # ContainerLab
+    # Set CLAB_MODE to enable the ContainerLab page. Leave empty to hide it.
+    # Supported values: local | ssh | rest
+    clab_mode: str = ""              # leave empty = feature hidden in UI
+    clab_binary: str = "clab"        # path/binary name for local mode
+    clab_topo_dir: str = "/opt/direttore/topologies"  # topology .yml storage dir
+
+    # SSH backend (clab_mode=ssh)
+    clab_ssh_host: str = ""
+    clab_ssh_port: int = 22
+    clab_ssh_user: str = "root"
+    clab_ssh_key_path: str = ""      # path to SSH private key file
+    clab_ssh_password: str = ""      # password fallback (prefer key)
+
+    # REST backend — clab-api-server (clab_mode=rest)
+    # https://github.com/srl-labs/clab-api-server
+    clab_api_url: str = ""           # e.g. https://clab-host:8080
+    clab_api_token: str = ""         # Bearer token (if api-server uses token auth)
+    clab_api_username: str = ""      # HTTP Basic username (alternative to token)
+    clab_api_password: str = ""      # HTTP Basic password
+    clab_api_verify_ssl: bool = True
+
+    # Topology Git backing (optional — works alongside any CLAB_MODE)
+    # Stores topology .yml files in a Git repo for history / rollback.
+    clab_topo_git_repo: str = ""          # HTTPS clone URL
+    clab_topo_git_branch: str = "main"
+    clab_topo_git_auth_token: str = ""    # PAT for HTTPS push
+    clab_topo_git_local_path: str = "/opt/direttore/clab-topologies"
+
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.api_cors_origins.split(",") if o.strip()]
