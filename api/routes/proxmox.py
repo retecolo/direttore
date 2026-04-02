@@ -55,6 +55,8 @@ def _raise502(e: Exception, context: str = "") -> None:
 @router.get("/nodes")
 def get_nodes() -> list[dict[str, Any]]:
     """List all Proxmox nodes with resource summary."""
+    if not settings.proxmox_enabled:
+        return []
     try:
         return px_client.get_nodes()
     except Exception as e:
@@ -68,6 +70,8 @@ def get_nodes() -> list[dict[str, Any]]:
 @router.get("/nodes/{node}/networks")
 def get_networks(node: str) -> list[dict[str, Any]]:
     """List bridge-type network interfaces available on a node."""
+    if not settings.proxmox_enabled:
+        return []
     try:
         return px_net.list_networks(node)
     except Exception as e:
@@ -81,6 +85,8 @@ def get_networks(node: str) -> list[dict[str, Any]]:
 @router.get("/nodes/{node}/storage")
 def get_storage(node: str) -> list[dict[str, Any]]:
     """List storage pools on a node that support VM images or CT rootfs."""
+    if not settings.proxmox_enabled:
+        return []
     try:
         return px_stor.list_storage(node)
     except Exception as e:
@@ -94,6 +100,8 @@ def get_storage(node: str) -> list[dict[str, Any]]:
 @router.get("/nodes/{node}/vms")
 def get_vms(node: str) -> list[dict[str, Any]]:
     """List all QEMU VMs on a node."""
+    if not settings.proxmox_enabled:
+        return []
     vms = px_vms.list_vms(node)
     for vm in vms:
         if f"{node}_vm_{vm['vmid']}" in MOCK_RUNNING_INSTANCES:
@@ -182,6 +190,8 @@ def vm_action(
 @router.get("/nodes/{node}/lxc")
 def get_containers(node: str) -> list[dict[str, Any]]:
     """List all LXC containers on a node."""
+    if not settings.proxmox_enabled:
+        return []
     cts = px_ct.list_containers(node)
     for ct in cts:
         if f"{node}_lxc_{ct['vmid']}" in MOCK_RUNNING_INSTANCES:
@@ -269,6 +279,8 @@ def container_action(
 @router.get("/nodes/{node}/templates")
 def get_templates(node: str) -> list[dict[str, Any]]:
     """List available ISOs and LXC templates on the node."""
+    if not settings.proxmox_enabled:
+        return []
     return px_tmpl.list_templates(node)
 
 
