@@ -43,6 +43,8 @@ async def containerlab_status() -> dict[str, Any]:
         "git_topologies": bool(settings.clab_topo_git_repo),
         "local_topo_dir": settings.clab_topo_dir,
         "mode": settings.clab_mode,
+        "ssh_host": settings.clab_ssh_host if settings.clab_mode == "ssh" else None,
+        "ssh_user": settings.clab_ssh_user if settings.clab_mode == "ssh" else None,
     }
     return status
 
@@ -141,7 +143,7 @@ async def get_topology(filename: str) -> dict[str, Any]:
     if "/" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="filename must be a plain filename, not a path")
     content = clab.read_topology_file(filename)
-    if content is None:
+    if not content:
         raise HTTPException(status_code=404, detail=f"Topology file not found: {filename}")
     history = []
     if settings.clab_topo_git_repo:
@@ -150,15 +152,69 @@ async def get_topology(filename: str) -> dict[str, Any]:
 
 
 @router.post("/topologies")
-async def upload_topology(file: UploadFile = File(...)) -> dict[str, Any]:
-    """Upload a new topology .yml file to CLAB_TOPO_DIR."""
+async def upload_topology(file: UploadFile = File(...), path: str = "") -> dict[str, Any]:
+    """Upload a new topology .yml or config file to CLAB_TOPO_DIR."""
     _require_clab()
-    filename = Path(file.filename or "topology.yml").name
-    if not filename.endswith((".yml", ".yaml")):
-        raise HTTPException(status_code=400, detail="Only .yml / .yaml files are accepted")
-    content = (await file.read()).decode()
-    clab.write_topology_file(filename, content)
-    return {"uploaded": True, "filename": filename, "size": len(content)}
+    # Strip leading slash if any
+    safe_path = path.lstrip("/")
+    filename = Path(file.filename or "file").name
+    full_path = str(Path(safe_path) / filename) if safe_path else filename
+        
+    content = (await file.read()).decode(errors='replace')
+    try:
+        clab.write_topology_file(full_path, content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"uploaded": True, "filename": full_path, "size": len(content)}
+
+
+class CreateFolderRequest(BaseModel):
+    path: str
+    
+    
+@router.post("/workspace/folder")
+async def create_folder(req: CreateFolderRequest) -> dict[str, Any]:
+    _require_clab()
+    topo_dir = Path(settings.clab_topo_dir).resolve()
+    target = (topo_dir / req.path).resolve()
+    if topo_dir not in target.parents:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    target.mkdir(parents=True, exist_ok=True)
+    return {"created": True, "path": req.path}
+
+
+class WriteFileRequest(BaseModel):
+    path: str
+    content: str
+
+
+@router.post("/workspace/file")
+async def save_workspace_file(req: WriteFileRequest) -> dict[str, Any]:
+    _require_clab()
+    try:
+        clab.write_topology_file(req.path, req.content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"saved": True, "path": req.path}
+
+
+@router.delete("/workspace/file")
+async def delete_workspace_file(path: str) -> dict[str, Any]:
+    _require_clab()
+    if not clab.delete_topology_file(path):
+        raise HTTPException(status_code=404, detail="File or directory not found")
+    return {"deleted": True, "path": path}
+
+
+@router.get("/workspace/{subpath:path}")
+async def list_workspace(subpath: str = "") -> dict[str, Any]:
+    """List directory contents for the topology workspace."""
+    _require_clab()
+    files = clab.list_workspace(subpath)
+    return {
+        "path": subpath,
+        "items": files
+    }
 
 
 # ---------------------------------------------------------------------------

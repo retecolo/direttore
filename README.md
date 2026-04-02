@@ -96,12 +96,43 @@ Orchestrate virtual network topologies powered by [ContainerLab](https://contain
 Page features:
 - **Status badge** — shows backend mode (local / ssh / rest) and live reachability
 - **Running labs table** — name, node count, topology path; click any row to open the lab detail drawer
-- **Lab detail drawer** — per-node table with kind, image, IPv4/IPv6, and state
-- **Deploy modal** — pick a topology file from `CLAB_TOPO_DIR` and deploy with one click
-- **Topology browser** — lists all `.yml` files in `CLAB_TOPO_DIR`; click to expand inline YAML viewer
-  - **Git history tab** — per-file commit log shown when `CLAB_TOPO_GIT_REPO` is configured
-- **Topology upload** — drag-and-drop or file-picker upload of `.yml` topology files to the server
-- All sub-features (Git history tab, SSH/REST indicators) are hidden when their respective env vars are not set
+- **Lab detail drawer** — per-node table with kind, image, IPv4/IPv6, and state. 
+  - **Console Access**: Instantly copy generated SSH commands to access container nodes. (See _Accessing ContainerLab Nodes via SSH_ below).
+- **Topology Workspace** — a fully interactive file manager for `CLAB_TOPO_DIR`:
+  - Create folders to organize `binds` and `startup-config` files for your labs.
+  - Create and edit text files (`.cfg`, `.cli`, `.json`) directly in the browser.
+  - Navigate directories using dynamic breadcrumbs.
+  - **Git history tab** — per-file commit log shown when `CLAB_TOPO_GIT_REPO` is configured.
+  - Deploy directly from any `.yml` topology file within the workspace.
+- **Topology upload** — file-picker upload of `.yml` and config files targeting the current workspace directory.
+- All sub-features (Git history tab, SSH/REST indicators) are hidden when their respective env vars are not set.
+
+#### Accessing ContainerLab Nodes via SSH
+
+ContainerLab exposes native SSH on the mgmt network bridge of the deployment host (usually `172.20.20.0/24`). You can find the exact node IPs within the Direttore "Inspect" drawer.
+
+**Local Mode:**
+If Direttore and your labs run locally on your machine, simply connect directly:
+```bash
+ssh admin@172.20.20.3
+```
+
+**SSH Remote Mode (ProxyJump):**
+If Direttore deploys labs to a remote SSH worker (e.g. `CLAB_MODE=ssh`), your workstation does not have a direct route to `172.20.20.x`. Direttore addresses this by surfacing a **Console ProxyJump Command** directly in the Lab drawer!
+
+Clicking the console button will automatically copy an SSH command formatted like this:
+```bash
+ssh -J root@my-clab-worker admin@172.20.20.3
+```
+This instantly routes your SSH session _through_ the worker node into the virtual container, giving you immediate terminal access without any VPNs or static routes.
+
+> **Pro-Tip**: You can persist this routing structure in your `~/.ssh/config`:
+> ```ssh-config
+> Host 172.20.20.*
+>     ProxyJump root@my-clab-worker
+>     User admin
+> ```
+> With this block, you can simply run `ssh 172.20.20.3` and your SSH client will automatically jump through the remote worker!
 
 #### Unimus connectivity notes
 
