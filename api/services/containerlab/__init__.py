@@ -83,7 +83,8 @@ async def local_status() -> dict[str, Any]:
 async def local_list_labs() -> list[dict[str, Any]]:
     rc, out, err = await _local_run(["inspect", "--all", "--format", "json"])
     if rc != 0:
-        if "no labs found" in out.lower() + err.lower():
+        err_lower = out.lower() + err.lower()
+        if "no labs found" in err_lower or "no containers found" in err_lower:
             return []
         raise RuntimeError(f"clab inspect failed: {err.strip() or out.strip()}")
     try:
@@ -192,7 +193,8 @@ async def ssh_status() -> dict[str, Any]:
 async def ssh_list_labs() -> list[dict[str, Any]]:
     rc, out, err = await _ssh_run(["inspect", "--all", "--format", "json"])
     if rc != 0:
-        if "no labs found" in out.lower() + err.lower():
+        err_lower = out.lower() + err.lower()
+        if "no labs found" in err_lower or "no containers found" in err_lower:
             return []
         raise RuntimeError(f"clab ssh inspect failed: {err.strip() or out.strip()}")
     try:
