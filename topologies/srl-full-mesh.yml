@@ -1,0 +1,64 @@
+name: srl-full-mesh
+topology:
+  nodes:
+    srl1:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:latest
+    srl2:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:latest
+    srl3:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:latest
+    srl4:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:latest
+    srl5:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:latest
+
+  links:
+    - endpoints: ["srl1:e1-1", "srl2:e1-1"]
+      labels:
+        ipv4: 10.10.1.0/31
+        ipv6: 3fff:0:1::/64
+    - endpoints: ["srl1:e1-2", "srl3:e1-1"]
+      labels:
+        ipv4: 10.10.2.0/31
+        ipv6: 3fff:0:2::/64
+    - endpoints: ["srl1:e1-3", "srl4:e1-1"]
+      labels:
+        ipv4: 10.10.3.0/31
+        ipv6: 3fff:0:3::/64
+    - endpoints: ["srl1:e1-4", "srl5:e1-1"]
+      labels:
+        ipv4: 10.10.4.0/31
+        ipv6: 3fff:0:4::/64
+
+    - endpoints: ["srl2:e1-2", "srl3:e1-2"]
+      labels:
+        ipv4: 10.10.5.0/31
+        ipv6: 3fff:0:5::/64
+    - endpoints: ["srl2:e1-3", "srl4:e1-2"]
+      labels:
+        ipv4: 10.10.6.0/31
+        ipv6: 3fff:0:6::/64
+    - endpoints: ["srl2:e1-4", "srl5:e1-2"]
+      labels:
+        ipv4: 10.10.7.0/31
+        ipv6: 3fff:0:7::/64
+
+    - endpoints: ["srl3:e1-3", "srl4:e1-3"]
+      labels:
+        ipv4: 10.10.8.0/31
+        ipv6: 3fff:0:8::/64
+    - endpoints: ["srl3:e1-4", "srl5:e1-3"]
+      labels:
+        ipv4: 10.10.9.0/31
+        ipv6: 3fff:0:9::/64
+
+    - endpoints: ["srl4:e1-4", "srl5:e1-4"]
+      labels:
+        ipv4: 10.10.10.0/31
+        ipv6: 3fff:0:a::/64
+
