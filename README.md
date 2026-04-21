@@ -95,17 +95,26 @@ Orchestrate virtual network topologies powered by [ContainerLab](https://contain
 
 Page features:
 - **Status badge** — shows backend mode (local / ssh / rest) and live reachability
-- **Running labs table** — name, node count, topology path; click any row to open the lab detail drawer
-- **Lab detail drawer** — per-node table with kind, image, IPv4/IPv6, and state. 
-  - **Console Access**: Instantly copy generated SSH commands to access container nodes. (See _Accessing ContainerLab Nodes via SSH_ below).
+- **Running labs table** — name, node count, topology path, and **lab age** (how long ago the lab was deployed); click any row to open the lab detail drawer
+- **Lab detail drawer** — per-node table with kind, image, IPv4/IPv6, and **colour-coded container state** (running / stopped / error)
+  - **Per-node actions**: restart, stop, or start individual nodes without tearing down the whole lab
+  - **In-browser terminal**: click the console button on any running node to open a full xterm.js terminal session over WebSocket — no SSH client or ProxyJump needed
+  - **SSH ProxyJump commands**: copy a ready-made `ssh -J ...` command for direct terminal access outside the browser
+- **Deploy panel** — select any `.yml` topology file and deploy with configurable options:
+  - **Reconfigure toggle** — choose whether to run `clab deploy --reconfigure` (redeploys existing nodes) or a plain deploy
+  - **Pre-deploy validation** — validate the topology file with `clab deploy --check` before committing; result shown inline
+  - **Topology graph preview** — an interactive React Flow canvas renders the node/link graph parsed directly from the YAML before you deploy
+  - **YAML editor** — edit the topology file in-browser with syntax highlighting before deploying
+  - **Real-time deploy log** — streaming SSE output with manual dismissal
+- **Destroy confirmation dialogue** — confirm before destroying a running lab to prevent accidental teardown
 - **Topology Workspace** — a fully interactive file manager for `CLAB_TOPO_DIR`:
-  - Create folders to organize `binds` and `startup-config` files for your labs.
-  - Create and edit text files (`.cfg`, `.cli`, `.json`) directly in the browser.
-  - Navigate directories using dynamic breadcrumbs.
-  - **Git history tab** — per-file commit log shown when `CLAB_TOPO_GIT_REPO` is configured.
-  - Deploy directly from any `.yml` topology file within the workspace.
-- **Topology upload** — file-picker upload of `.yml` and config files targeting the current workspace directory.
-- All sub-features (Git history tab, SSH/REST indicators) are hidden when their respective env vars are not set.
+  - Create, rename, duplicate, and delete folders and files in-browser
+  - Create and edit text files (`.cfg`, `.cli`, `.json`, `.yml`) directly in the browser
+  - Navigate directories using dynamic breadcrumbs
+  - **Git history tab** — per-file commit log shown when `CLAB_TOPO_GIT_REPO` is configured
+  - Deploy directly from any `.yml` topology file within the workspace
+- **Topology upload** — file-picker upload of `.yml` and config files targeting the current workspace directory
+- All sub-features (Git history tab, SSH/REST indicators) are hidden when their respective env vars are not set
 
 #### Accessing ContainerLab Nodes via SSH
 
@@ -511,12 +520,22 @@ Leave `CLAB_MODE` empty (or omit it) to hide the ContainerLab page entirely.
 | `GET` | `/api/containerlab/status` | Backend reachability check; returns mode, version, and configured features |
 | `GET` | `/api/containerlab/labs` | List all running labs (`clab inspect --all`) |
 | `GET` | `/api/containerlab/labs/{name}` | Inspect a specific lab — returns per-node detail |
-| `POST` | `/api/containerlab/labs` | Deploy a topology (`{"topo_file": "example.yml"}`) |
+| `POST` | `/api/containerlab/labs` | Deploy a topology (`{"topo_file": "example.yml", "reconfigure": true}`) |
+| `POST` | `/api/containerlab/labs/validate` | Validate a topology file without deploying (`clab deploy --check`) |
+| `POST` | `/api/containerlab/labs/deploy-stream` | Deploy and stream output back as SSE (`text/event-stream`) |
 | `DELETE` | `/api/containerlab/labs/{name}` | Destroy a running lab |
+| `POST` | `/api/containerlab/labs/{name}/nodes/{node}/action` | Run `start`, `stop`, or `restart` on a single node (`{"action": "restart"}`) |
+| `WebSocket` | `/api/containerlab/labs/{name}/nodes/{node}/console` | In-browser xterm.js terminal session for a node container |
 | `GET` | `/api/containerlab/topologies` | List `.yml` topology files in `CLAB_TOPO_DIR` |
 | `GET` | `/api/containerlab/topologies/{filename}` | Return raw YAML + optional Git history for a topology file |
 | `POST` | `/api/containerlab/topologies` | Upload a new topology file (`multipart/form-data`) |
 | `GET` | `/api/containerlab/topologies/{filename}/history` | Git commit history for a topology file (requires `CLAB_TOPO_GIT_REPO`) |
+| `GET` | `/api/containerlab/workspace/{subpath}` | List workspace directory contents |
+| `POST` | `/api/containerlab/workspace/folder` | Create a new folder in the workspace |
+| `POST` | `/api/containerlab/workspace/file` | Create or overwrite a workspace file |
+| `DELETE` | `/api/containerlab/workspace/file` | Delete a workspace file |
+| `POST` | `/api/containerlab/workspace/rename` | Rename a file or folder in the workspace |
+| `POST` | `/api/containerlab/workspace/duplicate` | Duplicate a file to a new name in the same directory |
 
 > [!NOTE]
 > All `/api/containerlab/*` endpoints return **HTTP 503** if `CLAB_MODE` is not set. The sidebar nav item is also hidden client-side until the status endpoint returns 200.
@@ -785,6 +804,7 @@ uv run python nornir_automation/generate_and_push.py
 | Unimus 2.8 backup endpoint auto-detection | ✅ Done | — |
 | ContainerLab integration — local, SSH, REST backends | ✅ Done | — |
 | ContainerLab topology Git backing + history | ✅ Done | — |
+| ContainerLab in-browser node console (xterm.js + WebSocket) | ✅ Done | — |
 | Real-time VM console (xterm.js + WebSocket) | Planned | 15 hrs |
 | Snapshot management UI | Planned | 5 hrs |
 | Prometheus metrics endpoint | Planned | 8 hrs |
