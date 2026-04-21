@@ -226,43 +226,78 @@ async def local_node_action(lab_name: str, node_name: str, action: str) -> dict[
 
 
 async def local_node_console(ws: Any, lab_name: str, node_name: str) -> None:
+    import os
+    import pty
+
     container = f"clab-{lab_name}-{node_name}"
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", "-i", container, "/bin/sh",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+    log.debug("local_node_console: attaching to %s", container)
+
+    # Allocate a PTY pair so docker exec -it sees a real terminal on its stdin,
+    # and the container process gets a proper PTY (not just pipes).
+    master_fd, slave_fd = pty.openpty()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", "-it", container, "/bin/sh",
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+        )
+    except Exception as exc:
+        os.close(master_fd)
+        os.close(slave_fd)
+        log.error("local_node_console: failed to start docker exec: %s", exc)
+        raise
+    # Parent process doesn't need the slave end after fork.
+    os.close(slave_fd)
+
+    loop = asyncio.get_running_loop()
 
     async def to_ws():
-        while True:
-            data = await proc.stdout.read(1024)
-            if not data:
-                return
-            try:
+        try:
+            while True:
+                fut: asyncio.Future = loop.create_future()
+                loop.add_reader(master_fd, fut.set_result, None)
+                try:
+                    await fut
+                finally:
+                    loop.remove_reader(master_fd)
+                try:
+                    data = os.read(master_fd, 4096)
+                except OSError:
+                    return
+                if not data:
+                    return
                 await ws.send_bytes(data)
-            except Exception:
-                return
+        except Exception:
+            return
 
     async def from_ws():
-        while True:
-            try:
+        try:
+            while True:
                 data = await ws.receive_bytes()
-            except Exception:
-                return
-            if proc.stdin and not proc.stdin.is_closing():
-                proc.stdin.write(data)
                 try:
-                    await proc.stdin.drain()
-                except Exception:
+                    os.write(master_fd, data)
+                except OSError:
                     return
+        except Exception:
+            return
 
     tasks = [asyncio.create_task(to_ws()), asyncio.create_task(from_ws())]
     _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     for t in pending:
         t.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+
     try:
-        proc.terminate()
+        os.close(master_fd)
+    except OSError:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
     except Exception:
         pass
 
