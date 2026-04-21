@@ -11,8 +11,9 @@ All three expose the same async interface:
   inspect_lab(name)    → dict
   deploy(topo_file)    → dict
   destroy(lab_name)    → dict
-  list_topologies()    → list[str]
-  read_topology(fname) → str
+  validate(topo_file)  → dict
+  node_action(lab, node, action) → dict
+  node_console(ws, lab, node)
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,16 @@ def _settings():
 def _topo_path(filename: str) -> Path:
     s = _settings()
     return Path(s.clab_topo_dir) / filename
+
+
+def _oldest_created_at(containers: list[dict]) -> str | None:
+    """Return the earliest container creation timestamp as an ISO string, or None."""
+    timestamps = []
+    for c in containers:
+        raw = c.get("createdAt") or c.get("created") or c.get("Created")
+        if raw and isinstance(raw, str):
+            timestamps.append(raw)
+    return min(timestamps) if timestamps else None
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +82,6 @@ async def local_status() -> dict[str, Any]:
         return {"ok": False, "mode": "local", "error": f"clab binary not found: {binary}"}
     rc, out, err = await _local_run(["version", "--format", "json"])
     if rc != 0:
-        # version flag may not support --format json on older builds
         rc2, out2, _ = await _local_run(["version"])
         return {"ok": rc2 == 0, "mode": "local", "binary": binary, "version_raw": out2.strip()}
     try:
@@ -78,6 +89,23 @@ async def local_status() -> dict[str, Any]:
         return {"ok": True, "mode": "local", "binary": binary, "version": data}
     except json.JSONDecodeError:
         return {"ok": True, "mode": "local", "binary": binary, "version_raw": out.strip()}
+
+
+def _build_labs_from_containers(containers: list[dict]) -> list[dict[str, Any]]:
+    """Group a flat container list into per-lab dicts."""
+    labs: dict[str, dict] = {}
+    for c in containers:
+        name = c.get("lab_name") or c.get("labName") or "unknown"
+        if name not in labs:
+            labs[name] = {
+                "name": name,
+                "lab_path": c.get("lab_path") or c.get("labPath", ""),
+                "containers": [],
+            }
+        labs[name]["containers"].append(c)
+    for lab in labs.values():
+        lab["created_at"] = _oldest_created_at(lab["containers"])
+    return list(labs.values())
 
 
 async def local_list_labs() -> list[dict[str, Any]]:
@@ -91,7 +119,6 @@ async def local_list_labs() -> list[dict[str, Any]]:
         data = json.loads(out)
     except json.JSONDecodeError:
         return []
-    # Output shape varies by clab version — normalise to list
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
@@ -103,19 +130,7 @@ async def local_list_labs() -> list[dict[str, Any]]:
             for k, v in data.items():
                 if isinstance(v, list):
                     containers.extend(v)
-                    
-        # Group containers by lab name
-        labs: dict[str, dict] = {}
-        for c in containers:
-            name = c.get("lab_name") or c.get("labName") or "unknown"
-            if name not in labs:
-                labs[name] = {
-                    "name": name,
-                    "lab_path": c.get("lab_path") or c.get("labPath", ""),
-                    "containers": [],
-                }
-            labs[name]["containers"].append(c)
-        return list(labs.values())
+        return _build_labs_from_containers(containers)
     return []
 
 
@@ -127,7 +142,7 @@ async def local_inspect_lab(name: str) -> dict[str, Any]:
         data = json.loads(out)
     except json.JSONDecodeError:
         return {"containers": [], "raw": out}
-        
+
     if isinstance(data, list):
         return {"containers": data}
     if isinstance(data, dict):
@@ -141,42 +156,53 @@ async def local_inspect_lab(name: str) -> dict[str, Any]:
     return {"containers": []}
 
 
-async def local_deploy(topo_file: str) -> dict[str, Any]:
+async def local_deploy(topo_file: str, reconfigure: bool = True) -> dict[str, Any]:
     path = str(_topo_path(topo_file))
-    rc, out, err = await _local_run(["deploy", "--topo", path, "--reconfigure"])
+    args = ["deploy", "--topo", path]
+    if reconfigure:
+        args.append("--reconfigure")
+    rc, out, err = await _local_run(args)
     if rc != 0:
         raise RuntimeError(f"clab deploy failed: {err.strip() or out.strip()}")
     return {"deployed": True, "output": out, "topo_file": topo_file}
 
 
-async def local_deploy_stream(topo_file: str):
+async def local_deploy_stream(topo_file: str, reconfigure: bool = True):
     s = _settings()
     path = str(_topo_path(topo_file))
-    
-    cmd = [s.clab_binary, "deploy", "--topo", path, "--reconfigure"]
+    cmd = [s.clab_binary, "deploy", "--topo", path]
+    if reconfigure:
+        cmd.append("--reconfigure")
     log.debug("clab local stream: %s", " ".join(cmd))
-    
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT
+        stderr=asyncio.subprocess.STDOUT,
     )
-    
+
     if proc.stdout is None:
         yield {"type": "error", "message": "Failed to create subprocess pipe"}
         return
-        
+
     while True:
         line = await proc.stdout.readline()
         if not line:
             break
         yield {"type": "log", "line": line.decode(errors='replace')}
-        
+
     rc = await proc.wait()
     if rc != 0:
         yield {"type": "error", "message": f"Deployment failed with exit code {rc}"}
     else:
         yield {"type": "success", "message": "Deployed successfully"}
+
+
+async def local_validate(topo_file: str) -> dict[str, Any]:
+    path = str(_topo_path(topo_file))
+    rc, out, err = await _local_run(["deploy", "--topo", path, "--check"])
+    output = (out + err).strip()
+    return {"valid": rc == 0, "output": output}
 
 
 async def local_destroy(lab_name: str) -> dict[str, Any]:
@@ -186,13 +212,68 @@ async def local_destroy(lab_name: str) -> dict[str, Any]:
     return {"destroyed": True, "lab_name": lab_name}
 
 
+async def local_node_action(lab_name: str, node_name: str, action: str) -> dict[str, Any]:
+    container = f"clab-{lab_name}-{node_name}"
+    proc = await asyncio.create_subprocess_exec(
+        "docker", action, container,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(stderr.decode().strip() or stdout.decode().strip())
+    return {"ok": True, "action": action, "container": container}
+
+
+async def local_node_console(ws: Any, lab_name: str, node_name: str) -> None:
+    container = f"clab-{lab_name}-{node_name}"
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "exec", "-i", container, "/bin/sh",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    async def to_ws():
+        while True:
+            data = await proc.stdout.read(1024)
+            if not data:
+                return
+            try:
+                await ws.send_bytes(data)
+            except Exception:
+                return
+
+    async def from_ws():
+        while True:
+            try:
+                data = await ws.receive_bytes()
+            except Exception:
+                return
+            if proc.stdin and not proc.stdin.is_closing():
+                proc.stdin.write(data)
+                try:
+                    await proc.stdin.drain()
+                except Exception:
+                    return
+
+    tasks = [asyncio.create_task(to_ws()), asyncio.create_task(from_ws())]
+    _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for t in pending:
+        t.cancel()
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # SSH backend
 # ---------------------------------------------------------------------------
 
 def _ssh_client():
     """Return a connected paramiko SSHClient."""
-    import paramiko  # already a project dependency
+    import paramiko
     s = _settings()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -261,14 +342,7 @@ async def ssh_list_labs() -> list[dict[str, Any]]:
             for k, v in data.items():
                 if isinstance(v, list):
                     containers.extend(v)
-                    
-        labs: dict[str, dict] = {}
-        for c in containers:
-            name = c.get("lab_name") or c.get("labName") or "unknown"
-            if name not in labs:
-                labs[name] = {"name": name, "lab_path": c.get("lab_path", ""), "containers": []}
-            labs[name]["containers"].append(c)
-        return list(labs.values())
+        return _build_labs_from_containers(containers)
     return []
 
 
@@ -294,26 +368,32 @@ async def ssh_inspect_lab(name: str) -> dict[str, Any]:
     return {"containers": []}
 
 
-async def ssh_deploy(topo_file: str) -> dict[str, Any]:
+async def ssh_deploy(topo_file: str, reconfigure: bool = True) -> dict[str, Any]:
     s = _settings()
     path = str(Path(s.clab_topo_dir) / topo_file)
-    rc, out, err = await _ssh_run(["deploy", "--topo", path, "--reconfigure"])
+    args = ["deploy", "--topo", path]
+    if reconfigure:
+        args.append("--reconfigure")
+    rc, out, err = await _ssh_run(args)
     if rc != 0:
         raise RuntimeError(f"clab ssh deploy failed: {err.strip() or out.strip()}")
     return {"deployed": True, "output": out, "topo_file": topo_file}
 
 
-async def ssh_deploy_stream(topo_file: str):
+async def ssh_deploy_stream(topo_file: str, reconfigure: bool = True):
     s = _settings()
     path = str(Path(s.clab_topo_dir) / topo_file)
-    cmd = " ".join([s.clab_binary, "deploy", "--topo", path, "--reconfigure"])
-    
+    cmd_parts = [s.clab_binary, "deploy", "--topo", path]
+    if reconfigure:
+        cmd_parts.append("--reconfigure")
+    cmd = " ".join(cmd_parts)
+
     client = await asyncio.to_thread(_ssh_client)
     try:
         _, stdout_f, stderr_f = client.exec_command(cmd, get_pty=True)
-        q = asyncio.Queue()
+        q: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
-        
+
         def reader():
             try:
                 for line in iter(stdout_f.readline, ""):
@@ -323,10 +403,9 @@ async def ssh_deploy_stream(topo_file: str):
             except Exception as e:
                 loop.call_soon_threadsafe(q.put_nowait, ("error", str(e)))
 
-        import threading
         t = threading.Thread(target=reader)
         t.start()
-        
+
         while True:
             item = await q.get()
             if isinstance(item, tuple):
@@ -342,10 +421,18 @@ async def ssh_deploy_stream(topo_file: str):
                     break
             else:
                 yield {"type": "log", "line": item}
-                
+
         await asyncio.to_thread(t.join)
     finally:
         client.close()
+
+
+async def ssh_validate(topo_file: str) -> dict[str, Any]:
+    s = _settings()
+    path = str(Path(s.clab_topo_dir) / topo_file)
+    rc, out, err = await _ssh_run(["deploy", "--topo", path, "--check"])
+    output = (out + err).strip()
+    return {"valid": rc == 0, "output": output}
 
 
 async def ssh_destroy(lab_name: str) -> dict[str, Any]:
@@ -353,6 +440,76 @@ async def ssh_destroy(lab_name: str) -> dict[str, Any]:
     if rc != 0:
         raise RuntimeError(f"clab ssh destroy failed: {err.strip() or out.strip()}")
     return {"destroyed": True, "lab_name": lab_name}
+
+
+async def ssh_node_action(lab_name: str, node_name: str, action: str) -> dict[str, Any]:
+    container = f"clab-{lab_name}-{node_name}"
+
+    def run():
+        client = _ssh_client()
+        try:
+            _, stdout_f, stderr_f = client.exec_command(f"docker {action} {container}")
+            out = stdout_f.read().decode()
+            err = stderr_f.read().decode()
+            rc = stdout_f.channel.recv_exit_status()
+            return rc, out, err
+        finally:
+            client.close()
+
+    rc, out, err = await asyncio.to_thread(run)
+    if rc != 0:
+        raise RuntimeError(err.strip() or out.strip())
+    return {"ok": True, "action": action, "container": container}
+
+
+async def ssh_node_console(ws: Any, lab_name: str, node_name: str) -> None:
+    container = f"clab-{lab_name}-{node_name}"
+
+    client = await asyncio.to_thread(_ssh_client)
+    channel = await asyncio.to_thread(client.invoke_shell)
+    await asyncio.to_thread(channel.send, f"docker exec -it {container} /bin/sh\n")
+
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue()
+
+    def reader():
+        try:
+            while not channel.closed:
+                if channel.recv_ready():
+                    data = channel.recv(1024)
+                    loop.call_soon_threadsafe(q.put_nowait, data)
+                elif channel.exit_status_ready():
+                    break
+        except Exception:
+            pass
+        loop.call_soon_threadsafe(q.put_nowait, None)
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+
+    async def to_ws():
+        while True:
+            data = await q.get()
+            if data is None:
+                return
+            try:
+                await ws.send_bytes(data)
+            except Exception:
+                return
+
+    async def from_ws():
+        while True:
+            try:
+                data = await ws.receive_bytes()
+                channel.send(data)
+            except Exception:
+                return
+
+    tasks = [asyncio.create_task(to_ws()), asyncio.create_task(from_ws())]
+    _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -404,26 +561,30 @@ async def rest_inspect_lab(name: str) -> dict[str, Any]:
     return r.json()
 
 
-async def rest_deploy(topo_file: str) -> dict[str, Any]:
+async def rest_deploy(topo_file: str, reconfigure: bool = True) -> dict[str, Any]:
     s = _settings()
     topo_path = str(Path(s.clab_topo_dir) / topo_file)
     async with httpx.AsyncClient(timeout=120, verify=s.clab_api_verify_ssl) as c:
         r = await c.post(
             f"{_rest_base()}/api/v1/labs",
             headers=_rest_headers(),
-            json={"topoFile": topo_path, "reconfigure": True},
+            json={"topoFile": topo_path, "reconfigure": reconfigure},
         )
     r.raise_for_status()
     return r.json()
 
 
-async def rest_deploy_stream(topo_file: str):
+async def rest_deploy_stream(topo_file: str, reconfigure: bool = True):
     try:
-        res = await rest_deploy(topo_file)
+        res = await rest_deploy(topo_file, reconfigure=reconfigure)
         yield {"type": "log", "line": res.get("output", "Successfully communicated with REST API.\n")}
         yield {"type": "success", "message": "Deployed successfully"}
     except Exception as exc:
         yield {"type": "error", "message": str(exc)}
+
+
+async def rest_validate(topo_file: str) -> dict[str, Any]:
+    return {"valid": None, "output": "Validation not supported for REST backend — deploy will catch errors."}
 
 
 async def rest_destroy(lab_name: str) -> dict[str, Any]:
@@ -435,6 +596,14 @@ async def rest_destroy(lab_name: str) -> dict[str, Any]:
         )
     r.raise_for_status()
     return {"destroyed": True, "lab_name": lab_name}
+
+
+async def rest_node_action(lab_name: str, node_name: str, action: str) -> dict[str, Any]:
+    return {"ok": False, "error": "Node actions are not supported for REST backend."}
+
+
+async def rest_node_console(ws: Any, lab_name: str, node_name: str) -> None:
+    await ws.send_bytes(b"\r\nNode console is not supported for REST backend.\r\n")
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +624,6 @@ def list_topology_files() -> list[str]:
 
 def read_topology_file(filename: str) -> str | None:
     s = _settings()
-    # Safely resolve path to prevent traversal
     topo_dir = Path(s.clab_topo_dir).resolve()
     path = (topo_dir / filename).resolve()
     if topo_dir not in path.parents or not path.is_file():
@@ -489,17 +657,49 @@ def delete_topology_file(filename: str) -> bool:
     return True
 
 
+def rename_workspace_item(old_path: str, new_name: str) -> str:
+    """Rename a file or directory within the workspace. Returns new relative path."""
+    s = _settings()
+    topo_dir = Path(s.clab_topo_dir).resolve()
+    old = (topo_dir / old_path).resolve()
+    if topo_dir not in old.parents or not old.exists():
+        raise ValueError("Source not found")
+    if "/" in new_name or ".." in new_name:
+        raise ValueError("new_name must be a plain filename")
+    new = old.parent / new_name
+    if new.exists():
+        raise ValueError(f"'{new_name}' already exists")
+    old.rename(new)
+    return str(new.relative_to(topo_dir))
+
+
+def duplicate_workspace_file(path: str, new_name: str) -> str:
+    """Copy a file to a new name in the same directory. Returns new relative path."""
+    s = _settings()
+    topo_dir = Path(s.clab_topo_dir).resolve()
+    src = (topo_dir / path).resolve()
+    if topo_dir not in src.parents or not src.is_file():
+        raise ValueError("Source not found or is a directory")
+    if "/" in new_name or ".." in new_name:
+        raise ValueError("new_name must be a plain filename")
+    dst = src.parent / new_name
+    if dst.exists():
+        raise ValueError(f"'{new_name}' already exists")
+    shutil.copy2(str(src), str(dst))
+    return str(dst.relative_to(topo_dir))
+
+
 def list_workspace(subpath: str = "") -> list[dict[str, Any]]:
     """Return a list of files and directories in the workspace."""
     s = _settings()
     topo_dir = Path(s.clab_topo_dir).resolve()
     target = (topo_dir / subpath).resolve()
-    
+
     if topo_dir not in target.parents and target != topo_dir:
         return []
     if not target.is_dir():
         return []
-        
+
     items = []
     for f in target.iterdir():
         if f.name.startswith(".git"):
@@ -523,8 +723,6 @@ def list_topology_git_history(filename: str, limit: int = 30) -> list[dict[str, 
     from api.config import settings as s
     if not s.clab_topo_git_repo:
         return []
-    from api.services import git_config as git
-    # Reuse git_config service pointed at topo dir — just read the log
     try:
         path = Path(s.clab_topo_git_local_path) / filename
         import git as gitpython  # type: ignore
@@ -585,27 +783,27 @@ async def inspect_lab(name: str) -> dict[str, Any]:
     raise RuntimeError(f"Unknown CLAB_MODE: {m}")
 
 
-async def deploy(topo_file: str) -> dict[str, Any]:
+async def deploy(topo_file: str, reconfigure: bool = True) -> dict[str, Any]:
     m = _mode()
     if m == "local":
-        return await local_deploy(topo_file)
+        return await local_deploy(topo_file, reconfigure=reconfigure)
     if m == "ssh":
-        return await ssh_deploy(topo_file)
+        return await ssh_deploy(topo_file, reconfigure=reconfigure)
     if m == "rest":
-        return await rest_deploy(topo_file)
+        return await rest_deploy(topo_file, reconfigure=reconfigure)
     raise RuntimeError(f"Unknown CLAB_MODE: {m}")
 
 
-async def deploy_stream(topo_file: str):
+async def deploy_stream(topo_file: str, reconfigure: bool = True):
     m = _mode()
     if m == "local":
-        async for chunk in local_deploy_stream(topo_file):
+        async for chunk in local_deploy_stream(topo_file, reconfigure=reconfigure):
             yield chunk
     elif m == "ssh":
-        async for chunk in ssh_deploy_stream(topo_file):
+        async for chunk in ssh_deploy_stream(topo_file, reconfigure=reconfigure):
             yield chunk
     elif m == "rest":
-        async for chunk in rest_deploy_stream(topo_file):
+        async for chunk in rest_deploy_stream(topo_file, reconfigure=reconfigure):
             yield chunk
     else:
         yield {"type": "error", "message": f"Unknown CLAB_MODE: {m}"}
@@ -620,3 +818,37 @@ async def destroy(lab_name: str) -> dict[str, Any]:
     if m == "rest":
         return await rest_destroy(lab_name)
     raise RuntimeError(f"Unknown CLAB_MODE: {m}")
+
+
+async def validate(topo_file: str) -> dict[str, Any]:
+    m = _mode()
+    if m == "local":
+        return await local_validate(topo_file)
+    if m == "ssh":
+        return await ssh_validate(topo_file)
+    if m == "rest":
+        return await rest_validate(topo_file)
+    raise RuntimeError(f"Unknown CLAB_MODE: {m}")
+
+
+async def node_action(lab_name: str, node_name: str, action: str) -> dict[str, Any]:
+    m = _mode()
+    if m == "local":
+        return await local_node_action(lab_name, node_name, action)
+    if m == "ssh":
+        return await ssh_node_action(lab_name, node_name, action)
+    if m == "rest":
+        return await rest_node_action(lab_name, node_name, action)
+    raise RuntimeError(f"Unknown CLAB_MODE: {m}")
+
+
+async def node_console(ws: Any, lab_name: str, node_name: str) -> None:
+    m = _mode()
+    if m == "local":
+        await local_node_console(ws, lab_name, node_name)
+    elif m == "ssh":
+        await ssh_node_console(ws, lab_name, node_name)
+    elif m == "rest":
+        await rest_node_console(ws, lab_name, node_name)
+    else:
+        await ws.send_bytes(f"Unknown CLAB_MODE: {m}".encode())
