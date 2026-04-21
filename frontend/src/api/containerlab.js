@@ -20,6 +20,11 @@ export const createFolder         = (path)       => axios.post(`${BASE}/workspac
 export const saveWorkspaceFile    = (path, content) => axios.post(`${BASE}/workspace/file`, { path, content }).then(r => r.data);
 export const deleteWorkspaceFile  = (path)       => axios.delete(`${BASE}/workspace/file`, { params: { path } }).then(r => r.data);
 
+export const validateTopology     = (topo_file) => axios.post(`${BASE}/labs/validate`, { topo_file }).then(r => r.data);
+export const nodeAction           = (lab, node, action) => axios.post(`${BASE}/labs/${encodeURIComponent(lab)}/nodes/${encodeURIComponent(node)}/action`, { action }).then(r => r.data);
+export const renameWorkspaceItem  = (old_path, new_name) => axios.post(`${BASE}/workspace/rename`, { old_path, new_name }).then(r => r.data);
+export const duplicateWorkspaceFile = (path, new_name) => axios.post(`${BASE}/workspace/duplicate`, { path, new_name }).then(r => r.data);
+
 export const uploadTopology = (file, path='') => {
   const fd = new FormData();
   fd.append('file', file);
