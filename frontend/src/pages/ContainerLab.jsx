@@ -85,15 +85,19 @@ function LabDrawer({ labName, opened, onClose, statusConfig }) {
     }),
   });
 
-  const getShellStr = (ipv4) => {
-    if (!ipv4) return null;
-    const ip = ipv4.split('/')[0];
+  const getShellStr = (c) => {
+    const ipv6 = c.ipv6_address || c.management?.ipv6;
+    const ipv4 = c.ipv4_address || c.management?.ipv4;
+    const raw = ipv6 || ipv4;
+    if (!raw) return null;
+    const bare = raw.split('/')[0];
+    const addr = ipv6 ? `[${bare}]` : bare;
     const mode = statusConfig?.mode;
     const s_host = statusConfig?.ssh_host;
     const s_user = statusConfig?.ssh_user;
     return mode === 'ssh' && s_host
-      ? `ssh -J ${s_user || 'root'}@${s_host} admin@${ip}`
-      : `ssh admin@${ip}`;
+      ? `ssh -J ${s_user || 'root'}@${s_host} admin@${addr}`
+      : `ssh admin@${addr}`;
   };
 
   const nodeName = (c) => c.name || c.container_name || '';
@@ -123,7 +127,7 @@ function LabDrawer({ labName, opened, onClose, statusConfig }) {
                   <Table.Th>Name</Table.Th>
                   <Table.Th>Kind</Table.Th>
                   <Table.Th>Image</Table.Th>
-                  <Table.Th>IPv4</Table.Th>
+                  <Table.Th>Management IP</Table.Th>
                   <Table.Th>State</Table.Th>
                   <Table.Th>Actions</Table.Th>
                 </Table.Tr>
@@ -132,7 +136,7 @@ function LabDrawer({ labName, opened, onClose, statusConfig }) {
                 {containers.map((c, i) => {
                   const state = c.state || '';
                   const name = nodeName(c);
-                  const shellStr = getShellStr(c.ipv4_address || c.management?.ipv4);
+                  const shellStr = getShellStr(c);
                   // strip clab-<lab>- prefix to get the bare node name
                   const bareNode = name.replace(new RegExp(`^clab-${labName}-`), '');
                   const isRunning = state === 'running';
@@ -151,7 +155,19 @@ function LabDrawer({ labName, opened, onClose, statusConfig }) {
                       <Table.Td style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         <Text size="xs" truncate>{c.image || '—'}</Text>
                       </Table.Td>
-                      <Table.Td ff="mono" fz={11}>{c.ipv4_address || c.management?.ipv4 || '—'}</Table.Td>
+                      <Table.Td>
+                        <Stack gap={2}>
+                          {(c.ipv6_address || c.management?.ipv6) && (
+                            <Text ff="mono" fz={10}>{(c.ipv6_address || c.management?.ipv6)}</Text>
+                          )}
+                          {(c.ipv4_address || c.management?.ipv4) && (
+                            <Text ff="mono" fz={10} c="dimmed">{(c.ipv4_address || c.management?.ipv4)}</Text>
+                          )}
+                          {!(c.ipv6_address || c.management?.ipv6) && !(c.ipv4_address || c.management?.ipv4) && (
+                            <Text fz={10} c="dimmed">—</Text>
+                          )}
+                        </Stack>
+                      </Table.Td>
                       <Table.Td>
                         <Badge size="xs" color={STATE_COLORS[state] || 'gray'}>{state || '—'}</Badge>
                       </Table.Td>
