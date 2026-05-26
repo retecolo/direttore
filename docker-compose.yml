@@ -1,12 +1,33 @@
-version: "3.9"
-
 services:
+  traefik:
+    image: traefik:v3
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    restart: unless-stopped
+    networks:
+      - proxy
+
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
-    ports:
-      - "[::1]:8000:8000"
+    expose:
+      - "8000"
     environment:
       - PROXMOX_MOCK=true
     env_file:
@@ -14,13 +35,30 @@ services:
     volumes:
       - ./direttore.db:/app/direttore.db
     restart: unless-stopped
+    networks:
+      - proxy
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile.frontend
-    ports:
-      - "[::1]:5173:80"
+    expose:
+      - "80"
     depends_on:
       - api
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
     restart: unless-stopped
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    driver: bridge
+
+volumes:
+  letsencrypt:

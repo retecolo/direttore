@@ -317,6 +317,13 @@ The Vite dev server also proxies the following paths directly to the FastAPI bac
 
 ## Environment Variables
 
+### Traefik / TLS (Docker deployments)
+
+| Variable | Default | Description |
+|---|---|---|
+| `DOMAIN` | `direttore.example.com` | Public hostname Traefik routes and requests a certificate for |
+| `ACME_EMAIL` | `admin@example.com` | Email sent to Let's Encrypt for expiry notifications |
+
 ### Core
 
 | Variable | Default | Description |
@@ -541,7 +548,9 @@ Leave `CLAB_MODE` empty (or omit it) to hide the ContainerLab page entirely.
 > All `/api/containerlab/*` endpoints return **HTTP 503** if `CLAB_MODE` is not set. The sidebar nav item is also hidden client-side until the status endpoint returns 200.
 
 
-## nginx Reverse Proxy
+## nginx Reverse Proxy (bare-metal only)
+
+> **Docker deployments** use Traefik — see the [Docker Compose](#docker-compose) section above. The nginx configs below are for bare-metal installs where Direttore runs directly under `systemd`.
 
 Example configs live in [`docs/nginx/`](docs/nginx/):
 
@@ -605,15 +614,27 @@ sudo systemctl status direttore-api
 
 ## Docker Compose
 
-### Quick-start (production-like)
+### Quick-start (production — Traefik + Let's Encrypt)
+
+`docker-compose.yml` uses [Traefik](https://traefik.io) as the sole externally-exposed service. Traefik automatically obtains and renews a Let's Encrypt certificate for your domain and redirects all HTTP traffic to HTTPS. The `api` and `frontend` services are not reachable from outside the host — only Traefik can reach them.
+
+**Prerequisites:**
+- Port 80 and 443 open on the host firewall
+- DNS for `DOMAIN` resolving to this host **before** you start the stack (Let's Encrypt performs an HTTP-01 challenge on first boot)
 
 ```bash
-cp .env.example .env   # set PROXMOX_MOCK=true if no real Proxmox
-docker compose up
+cp .env.example .env
+# Required: set your public hostname and ACME email
+# DOMAIN=direttore.example.com
+# ACME_EMAIL=admin@example.com
+# Also set PROXMOX_MOCK=true if no real Proxmox
+
+docker compose up -d
 ```
 
-- API: **http://localhost:8000**
-- Frontend: **http://localhost:5173**
+Once up, the app is available at **https://your.domain** — HTTP requests are redirected to HTTPS automatically.
+
+> **Certificate storage**: Let's Encrypt state is persisted in the `letsencrypt` Docker volume so certificates survive container restarts and are reused across deploys.
 
 ### Full Dev Stack (`docker-compose.dev.yml`)
 
@@ -726,7 +747,7 @@ direttore/
 ├── pyproject.toml                # Python project metadata + dependencies (uv)
 ├── uv.lock                       # Locked dependency tree
 ├── Dockerfile.api                # Backend Docker image
-├── docker-compose.yml            # Quick-start full-stack compose
+├── docker-compose.yml            # Production compose — Traefik + Let's Encrypt
 ├── docker-compose.dev.yml        # Full dev stack (Proxmox + NetBox + Postgres + Redis)
 └── .env.example                  # Environment variable template
 ```
