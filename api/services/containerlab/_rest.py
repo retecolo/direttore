@@ -86,7 +86,10 @@ class RestBackend(ClabBackend):
         url = f"{self._base()}/api/v1/labs"
         payload = {"topoFile": self._topo_path(topo_file), "reconfigure": reconfigure}
         try:
-            async with httpx.AsyncClient(timeout=120, verify=self._verify()) as c:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=30, read=None, write=None, pool=None),
+                verify=self._verify(),
+            ) as c:
                 async with c.stream(
                     "POST", url, headers=self._headers(), json=payload
                 ) as response:
