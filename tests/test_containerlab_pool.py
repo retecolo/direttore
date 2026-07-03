@@ -99,3 +99,20 @@ async def test_pool_respects_max_size():
                     await task
                 except asyncio.CancelledError:
                     pass
+
+
+@pytest.mark.asyncio
+async def test_pool_releases_semaphore_on_connect_failure():
+    from api.services.containerlab._ssh import _SshPool
+    pool = _SshPool(max_size=1)
+
+    with patch.object(pool, "_connect", side_effect=Exception("connection refused")):
+        with pytest.raises(Exception, match="connection refused"):
+            async with pool.acquire():
+                pass
+
+    # semaphore must be released — a second acquire should not hang
+    fresh = _make_healthy_client()
+    with patch.object(pool, "_connect", return_value=fresh):
+        async with pool.acquire() as c:
+            assert c is fresh

@@ -7,6 +7,7 @@ per-call connect/disconnect overhead.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import threading
@@ -44,22 +45,27 @@ class _SshPool:
     @asynccontextmanager
     async def acquire(self) -> AsyncIterator[paramiko.SSHClient]:
         await self._sem.acquire()
+        client = None
         try:
             async with self._lock:
-                client = self._checkout()
+                client = self._pop_healthy()
+            if client is None:
+                client = await asyncio.to_thread(self._connect)
             yield client
         finally:
-            async with self._lock:
-                self._pool.append(client)
+            if client is not None:
+                async with self._lock:
+                    self._pool.append(client)
             self._sem.release()
 
-    def _checkout(self) -> paramiko.SSHClient:
+    def _pop_healthy(self) -> paramiko.SSHClient | None:
+        """Pop a healthy client from the pool list. Call only while holding self._lock."""
         while self._pool:
             client = self._pool.pop()
             if self._is_healthy(client):
                 return client
             client.close()
-        return self._connect()
+        return None
 
     def _connect(self) -> paramiko.SSHClient:
         s = _settings()
@@ -182,7 +188,7 @@ class SshBackend(ClabBackend):
 
         async with self._pool.acquire() as client:
             _, stdout_f, _ = await asyncio.to_thread(
-                client.exec_command, cmd, True  # get_pty=True
+                functools.partial(client.exec_command, cmd, get_pty=True)
             )
 
         q: asyncio.Queue = asyncio.Queue()
@@ -200,22 +206,27 @@ class SshBackend(ClabBackend):
         t = threading.Thread(target=reader, daemon=True)
         t.start()
 
-        while True:
-            item = await q.get()
-            if isinstance(item, tuple):
-                tag, val = item
-                if tag == "exit":
-                    if val != 0:
-                        yield {"type": "error", "message": f"Exit code {val}"}
+        try:
+            while True:
+                item = await q.get()
+                if isinstance(item, tuple):
+                    tag, val = item
+                    if tag == "exit":
+                        if val != 0:
+                            yield {"type": "error", "message": f"Exit code {val}"}
+                        else:
+                            yield {"type": "success", "message": "Deployed successfully"}
                     else:
-                        yield {"type": "success", "message": "Deployed successfully"}
+                        yield {"type": "error", "message": val}
+                    break
                 else:
-                    yield {"type": "error", "message": val}
-                break
-            else:
-                yield {"type": "log", "line": item}
-
-        await asyncio.to_thread(t.join)
+                    yield {"type": "log", "line": item}
+        finally:
+            try:
+                stdout_f.channel.close()
+            except Exception:
+                pass
+            await asyncio.to_thread(t.join, timeout=5)
 
     async def destroy(self, lab_name: str) -> dict[str, Any]:
         rc, out, err = await self._run(["destroy", "--name", lab_name])
