@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Text, Badge, Group, Stack, Button, Loader, Alert,
   ActionIcon, FileInput, Paper, Breadcrumbs, Anchor, Modal,
-  TextInput,
+  TextInput, Code,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
@@ -47,6 +47,7 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
 
   const [graphTarget, setGraphTarget] = useState(null); // topology filename
   const [editLoading, setEditLoading] = useState(null); // path being loaded
+  const [confirmDeleteTarget, setConfirmDeleteTarget] = useState(null); // path string
 
   const wsQ = useQuery({
     queryKey: ['clab-ws', currentPath],
@@ -231,8 +232,7 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
                     </ActionIcon>
                   )}
                   <ActionIcon size="sm" variant="subtle" color="red"
-                    loading={deleteMut.isPending && deleteMut.variables === item.path}
-                    onClick={() => deleteMut.mutate(item.path)}>
+                    onClick={() => setConfirmDeleteTarget(item.path)}>
                     <IconTrash size={13} />
                   </ActionIcon>
                 </Group>
@@ -305,6 +305,43 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
           disabled={!duplicateName}>
           Duplicate
         </Button>
+      </Modal>
+
+      {/* Delete confirmation modal */}
+      <Modal
+        opened={!!confirmDeleteTarget}
+        onClose={() => setConfirmDeleteTarget(null)}
+        title={
+          <Group gap="xs">
+            <IconTrash size={16} color="var(--mantine-color-red-5)" />
+            <Text fw={600}>Delete Item</Text>
+          </Group>
+        }
+        size="sm"
+      >
+        <Stack>
+          <Text size="sm">
+            Are you sure you want to delete <Code>{confirmDeleteTarget}</Code>?
+            This cannot be undone.
+          </Text>
+          <Group justify="flex-end" mt="xs">
+            <Button variant="subtle" color="gray" onClick={() => setConfirmDeleteTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              color="red"
+              loading={deleteMut.isPending}
+              leftSection={<IconTrash size={14} />}
+              onClick={() =>
+                deleteMut.mutate(confirmDeleteTarget, {
+                  onSettled: () => setConfirmDeleteTarget(null),
+                })
+              }
+            >
+              Delete
+            </Button>
+          </Group>
+        </Stack>
       </Modal>
 
       {/* Topology graph modal */}
