@@ -19,6 +19,8 @@ from api.services.containerlab._base import (
 
 log = logging.getLogger(__name__)
 
+ALLOWED_ACTIONS = {"start", "stop", "restart"}
+
 
 def _settings():
     from api.config import settings
@@ -73,7 +75,7 @@ class LocalBackend(ClabBackend):
         except json.JSONDecodeError:
             return []
         if isinstance(data, list):
-            return data
+            return build_labs_from_containers(data)
         if isinstance(data, dict):
             containers = data.get("containers") or []
             if not containers:
@@ -142,6 +144,8 @@ class LocalBackend(ClabBackend):
     async def node_action(
         self, lab_name: str, node_name: str, action: str
     ) -> dict[str, Any]:
+        if action not in ALLOWED_ACTIONS:
+            raise ValueError(f"Action {action!r} is not allowed. Must be one of {ALLOWED_ACTIONS}")
         container = f"clab-{lab_name}-{node_name}"
         proc = await asyncio.create_subprocess_exec(
             "docker", action, container,
