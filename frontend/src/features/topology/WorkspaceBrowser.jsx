@@ -10,6 +10,7 @@ import {
   IconUpload, IconCode, IconFolder, IconFolderPlus,
   IconFilePlus, IconTrash, IconChevronRight,
   IconPlayerPlay, IconPencil, IconCopy, IconTopologyFull,
+  IconFileCode,
 } from '@tabler/icons-react';
 import CodeMirror from '@uiw/react-codemirror';
 import { yaml } from '@codemirror/lang-yaml';
@@ -45,6 +46,7 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
   const [duplicateName, setDuplicateName] = useState('');
 
   const [graphTarget, setGraphTarget] = useState(null); // topology filename
+  const [editLoading, setEditLoading] = useState(null); // path being loaded
 
   const wsQ = useQuery({
     queryKey: ['clab-ws', currentPath],
@@ -61,6 +63,21 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['clab-ws'] });
     qc.invalidateQueries({ queryKey: ['clab-topologies'] });
+  };
+
+  const openEdit = async (item) => {
+    setEditLoading(item.path);
+    try {
+      const data = await getTopology(item.path);
+      setEditingFile(item.path);
+      setFileName(item.name);
+      setFileContent(data.content ?? '');
+      setFileModalOpen(true);
+    } catch (e) {
+      notifications.show({ color: 'red', title: 'Could not load file', message: e.response?.data?.detail || e.message });
+    } finally {
+      setEditLoading(null);
+    }
   };
 
   const uploadMut = useMutation({
@@ -194,6 +211,15 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
                       </ActionIcon>
                     </>
                   )}
+                  {!item.is_dir && (
+                    <ActionIcon
+                      size="sm" variant="subtle" color="indigo"
+                      loading={editLoading === item.path}
+                      onClick={() => openEdit(item)}
+                    >
+                      <IconFileCode size={13} />
+                    </ActionIcon>
+                  )}
                   <ActionIcon size="sm" variant="subtle" color="blue"
                     onClick={() => { setRenameTarget(item); setRenameName(item.name); }}>
                     <IconPencil size={13} />
@@ -241,7 +267,7 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
           value={fileContent}
           height="360px"
           theme={oneDark}
-          extensions={[yaml()]}
+          extensions={(fileName.endsWith('.yml') || fileName.endsWith('.yaml')) ? [yaml()] : []}
           onChange={(val) => setFileContent(val)}
           style={{ borderRadius: 6, overflow: 'hidden', fontSize: 13 }}
         />
