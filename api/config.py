@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     clab_ssh_user: str = "root"
     clab_ssh_key_path: str = ""      # path to SSH private key file
     clab_ssh_password: str = ""      # password fallback (prefer key)
+    clab_ssh_pool_size: int = 4       # max concurrent SSH connections for ssh mode
 
     # REST backend — clab-api-server (clab_mode=rest)
     # https://github.com/srl-labs/clab-api-server
