@@ -10,6 +10,7 @@ import asyncio
 import functools
 import json
 import logging
+import shlex
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -46,16 +47,23 @@ class _SshPool:
     async def acquire(self) -> AsyncIterator[paramiko.SSHClient]:
         await self._sem.acquire()
         client = None
+        healthy = True
         try:
             async with self._lock:
                 client = self._pop_healthy()
             if client is None:
                 client = await asyncio.to_thread(self._connect)
             yield client
+        except Exception:
+            healthy = False
+            raise
         finally:
             if client is not None:
-                async with self._lock:
-                    self._pool.append(client)
+                if healthy and self._is_healthy(client):
+                    async with self._lock:
+                        self._pool.append(client)
+                else:
+                    client.close()
             self._sem.release()
 
     def _pop_healthy(self) -> paramiko.SSHClient | None:
@@ -109,7 +117,7 @@ class SshBackend(ClabBackend):
         self, client: paramiko.SSHClient, args: list[str]
     ) -> tuple[int, str, str]:
         s = _settings()
-        cmd = " ".join([s.clab_binary] + args)
+        cmd = " ".join(shlex.quote(token) for token in [s.clab_binary] + args)
         log.debug("clab ssh: %s", cmd)
         _, stdout_f, stderr_f = client.exec_command(cmd)
         out = stdout_f.read().decode()
@@ -148,7 +156,7 @@ class SshBackend(ClabBackend):
         except json.JSONDecodeError:
             return []
         if isinstance(data, list):
-            return data
+            return build_labs_from_containers(data)
         if isinstance(data, dict):
             containers = data.get("containers") or []
             if not containers:
@@ -184,7 +192,7 @@ class SshBackend(ClabBackend):
         cmd_parts = [s.clab_binary, "deploy", "--topo", self._topo_path(topo_file)]
         if reconfigure:
             cmd_parts.append("--reconfigure")
-        cmd = " ".join(cmd_parts)
+        cmd = " ".join(shlex.quote(p) for p in cmd_parts)
 
         async with self._pool.acquire() as client:
             _, stdout_f, _ = await asyncio.to_thread(
@@ -248,7 +256,9 @@ class SshBackend(ClabBackend):
         container = f"clab-{lab_name}-{node_name}"
 
         def run(client: paramiko.SSHClient) -> tuple[int, str, str]:
-            _, stdout_f, stderr_f = client.exec_command(f"docker {action} {container}")
+            _, stdout_f, stderr_f = client.exec_command(
+                f"{shlex.quote('docker')} {shlex.quote(action)} {shlex.quote(container)}"
+            )
             out = stdout_f.read().decode()
             err = stderr_f.read().decode()
             rc = stdout_f.channel.recv_exit_status()

@@ -248,6 +248,16 @@ class WriteFileRequest(BaseModel):
     content: str
 
 
+@router.get("/workspace/file")
+async def read_workspace_file(path: str) -> dict[str, Any]:
+    """Read a workspace file's content by relative path (supports subdirectories)."""
+    _require_clab()
+    content = clab.read_topology_file(path)
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    return {"path": path, "content": content}
+
+
 @router.post("/workspace/file")
 async def save_workspace_file(req: WriteFileRequest) -> dict[str, Any]:
     _require_clab()

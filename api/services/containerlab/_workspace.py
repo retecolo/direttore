@@ -54,6 +54,8 @@ def write_topology_file(filename: str, content: str) -> None:
     path = (topo_dir / filename).resolve()
     if topo_dir not in path.parents:
         raise ValueError("Invalid path")
+    if path.exists() and path.is_dir():
+        raise ValueError("Invalid path: is a directory")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
 

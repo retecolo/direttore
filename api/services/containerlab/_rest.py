@@ -126,7 +126,7 @@ class RestBackend(ClabBackend):
     async def node_action(
         self, lab_name: str, node_name: str, action: str
     ) -> dict[str, Any]:
-        return {"ok": False, "error": "Node actions are not supported for REST backend."}
+        raise NotImplementedError("Node actions are not supported for REST backend.")
 
     async def node_console(self, ws: Any, lab_name: str, node_name: str) -> None:
         await ws.send_bytes(b"\r\nNode console is not supported for REST backend.\r\n")
