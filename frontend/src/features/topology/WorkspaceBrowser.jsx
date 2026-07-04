@@ -18,7 +18,7 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import {
   listWorkspace, uploadTopology, createFolder, saveWorkspaceFile,
   deleteWorkspaceFile, renameWorkspaceItem, duplicateWorkspaceFile,
-  getTopology,
+  getTopology, readWorkspaceFile,
 } from '../../api/containerlab';
 import { TopologyGraph } from './TopologyGraph';
 
@@ -56,7 +56,7 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
 
   const graphQ = useQuery({
     queryKey: ['clab-topo-preview', graphTarget],
-    queryFn: () => getTopology(graphTarget),
+    queryFn: () => readWorkspaceFile(graphTarget),
     enabled: !!graphTarget,
     staleTime: 30000,
   });
@@ -69,7 +69,7 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
   const openEdit = async (item) => {
     setEditLoading(item.path);
     try {
-      const data = await getTopology(item.path);
+      const data = await readWorkspaceFile(item.path);
       setEditingFile(item.path);
       setFileName(item.name);
       setFileContent(data.content ?? '');

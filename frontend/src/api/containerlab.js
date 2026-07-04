@@ -16,6 +16,7 @@ export const getTopology          = (filename)   => axios.get(`${BASE}/topologie
 export const getTopologyHistory   = (filename)   => axios.get(`${BASE}/topologies/${encodeURIComponent(filename)}/history`).then(r => r.data);
 
 export const listWorkspace        = (subpath='') => axios.get(`${BASE}/workspace/${encodeURIComponent(subpath)}`).then(r => r.data);
+export const readWorkspaceFile    = (path)       => axios.get(`${BASE}/workspace/file`, { params: { path } }).then(r => r.data);
 export const createFolder         = (path)       => axios.post(`${BASE}/workspace/folder`, { path }).then(r => r.data);
 export const saveWorkspaceFile    = (path, content) => axios.post(`${BASE}/workspace/file`, { path, content }).then(r => r.data);
 export const deleteWorkspaceFile  = (path)       => axios.delete(`${BASE}/workspace/file`, { params: { path } }).then(r => r.data);
