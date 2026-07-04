@@ -284,7 +284,7 @@ class SshBackend(ClabBackend):
             channel = transport.open_session()
             channel.get_pty()
             channel.invoke_shell()
-            channel.sendall(f"docker exec -it {container} /bin/sh\n")
+            channel.sendall(f"docker exec -it {shlex.quote(container)} /bin/sh\n")
             return channel
 
         async with self._pool.acquire() as client:
