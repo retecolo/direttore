@@ -3,13 +3,14 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Text, Badge, Group, Stack, Button, Loader, Alert,
   ActionIcon, FileInput, Paper, Breadcrumbs, Anchor, Modal,
-  TextInput,
+  TextInput, Code,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconUpload, IconCode, IconFolder, IconFolderPlus,
   IconFilePlus, IconTrash, IconChevronRight,
   IconPlayerPlay, IconPencil, IconCopy, IconTopologyFull,
+  IconFileCode,
 } from '@tabler/icons-react';
 import CodeMirror from '@uiw/react-codemirror';
 import { yaml } from '@codemirror/lang-yaml';
@@ -17,7 +18,7 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import {
   listWorkspace, uploadTopology, createFolder, saveWorkspaceFile,
   deleteWorkspaceFile, renameWorkspaceItem, duplicateWorkspaceFile,
-  getTopology,
+  getTopology, readWorkspaceFile,
 } from '../../api/containerlab';
 import { TopologyGraph } from './TopologyGraph';
 
@@ -45,6 +46,8 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
   const [duplicateName, setDuplicateName] = useState('');
 
   const [graphTarget, setGraphTarget] = useState(null); // topology filename
+  const [editLoading, setEditLoading] = useState(null); // path being loaded
+  const [confirmDeleteTarget, setConfirmDeleteTarget] = useState(null); // path string
 
   const wsQ = useQuery({
     queryKey: ['clab-ws', currentPath],
@@ -53,7 +56,7 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
 
   const graphQ = useQuery({
     queryKey: ['clab-topo-preview', graphTarget],
-    queryFn: () => getTopology(graphTarget),
+    queryFn: () => readWorkspaceFile(graphTarget),
     enabled: !!graphTarget,
     staleTime: 30000,
   });
@@ -61,6 +64,21 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['clab-ws'] });
     qc.invalidateQueries({ queryKey: ['clab-topologies'] });
+  };
+
+  const openEdit = async (item) => {
+    setEditLoading(item.path);
+    try {
+      const data = await readWorkspaceFile(item.path);
+      setEditingFile(item.path);
+      setFileName(item.name);
+      setFileContent(data.content ?? '');
+      setFileModalOpen(true);
+    } catch (e) {
+      notifications.show({ color: 'red', title: 'Could not load file', message: e.response?.data?.detail || e.message });
+    } finally {
+      setEditLoading(null);
+    }
   };
 
   const uploadMut = useMutation({
@@ -194,6 +212,15 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
                       </ActionIcon>
                     </>
                   )}
+                  {!item.is_dir && (
+                    <ActionIcon
+                      size="sm" variant="subtle" color="indigo"
+                      loading={editLoading === item.path}
+                      onClick={() => openEdit(item)}
+                    >
+                      <IconFileCode size={13} />
+                    </ActionIcon>
+                  )}
                   <ActionIcon size="sm" variant="subtle" color="blue"
                     onClick={() => { setRenameTarget(item); setRenameName(item.name); }}>
                     <IconPencil size={13} />
@@ -205,8 +232,7 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
                     </ActionIcon>
                   )}
                   <ActionIcon size="sm" variant="subtle" color="red"
-                    loading={deleteMut.isPending && deleteMut.variables === item.path}
-                    onClick={() => deleteMut.mutate(item.path)}>
+                    onClick={() => setConfirmDeleteTarget(item.path)}>
                     <IconTrash size={13} />
                   </ActionIcon>
                 </Group>
@@ -241,7 +267,7 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
           value={fileContent}
           height="360px"
           theme={oneDark}
-          extensions={[yaml()]}
+          extensions={(fileName.endsWith('.yml') || fileName.endsWith('.yaml')) ? [yaml()] : []}
           onChange={(val) => setFileContent(val)}
           style={{ borderRadius: 6, overflow: 'hidden', fontSize: 13 }}
         />
@@ -279,6 +305,43 @@ export function WorkspaceBrowser({ gitConfigured, onDeploy }) {
           disabled={!duplicateName}>
           Duplicate
         </Button>
+      </Modal>
+
+      {/* Delete confirmation modal */}
+      <Modal
+        opened={!!confirmDeleteTarget}
+        onClose={() => setConfirmDeleteTarget(null)}
+        title={
+          <Group gap="xs">
+            <IconTrash size={16} color="var(--mantine-color-red-5)" />
+            <Text fw={600}>Delete Item</Text>
+          </Group>
+        }
+        size="sm"
+      >
+        <Stack>
+          <Text size="sm">
+            Are you sure you want to delete <Code>{confirmDeleteTarget}</Code>?
+            This cannot be undone.
+          </Text>
+          <Group justify="flex-end" mt="xs">
+            <Button variant="subtle" color="gray" onClick={() => setConfirmDeleteTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              color="red"
+              loading={deleteMut.isPending}
+              leftSection={<IconTrash size={14} />}
+              onClick={() =>
+                deleteMut.mutate(confirmDeleteTarget, {
+                  onSettled: () => setConfirmDeleteTarget(null),
+                })
+              }
+            >
+              Delete
+            </Button>
+          </Group>
+        </Stack>
       </Modal>
 
       {/* Topology graph modal */}
