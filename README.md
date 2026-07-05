@@ -317,6 +317,22 @@ The Vite dev server also proxies the following paths directly to the FastAPI bac
 
 ## Environment Variables
 
+### Stack Mode (Docker deployments)
+
+Controls which address families Traefik binds on the host. IPv6 / dual-stack is the default. See [docs/daemon-ipv6.md](docs/daemon-ipv6.md) for Docker daemon setup.
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRAEFIK_HOST_IP` | `::` | Host IP for Docker port bindings. `::` = dual-stack (IPv4+IPv6); `0.0.0.0` = IPv4 only |
+| `TRAEFIK_BIND_ADDR` | `[::]` | Address Traefik entrypoints bind inside the container. `[::]` = all; `0.0.0.0` = IPv4 only |
+| `ENABLE_IPV6` | `true` | Adds an IPv6 IPAM subnet (`fd00:0:1::/64`) to the internal Docker proxy network |
+
+| Mode | `TRAEFIK_HOST_IP` | `TRAEFIK_BIND_ADDR` | `ENABLE_IPV6` |
+|---|---|---|---|
+| Dual-stack / IPv6-preferred (default) | `::` | `[::]` | `true` |
+| IPv6-only | `::` | `[::]` | `true` + drop IPv4 at host firewall |
+| IPv4-only | `0.0.0.0` | `0.0.0.0` | `false` |
+
 ### Traefik / TLS (Docker deployments)
 
 | Variable | Default | Description |
@@ -548,47 +564,112 @@ Leave `CLAB_MODE` empty (or omit it) to hide the ContainerLab page entirely.
 > All `/api/containerlab/*` endpoints return **HTTP 503** if `CLAB_MODE` is not set. The sidebar nav item is also hidden client-side until the status endpoint returns 200.
 
 
-## nginx Reverse Proxy (bare-metal only)
+## HTTPS on a Bare-Metal Install
 
-> **Docker deployments** use Traefik — see the [Docker Compose](#docker-compose) section above. The nginx configs below are for bare-metal installs where Direttore runs directly under `systemd`.
+> **Docker deployments** use Traefik instead — see the [Docker Compose](#docker-compose) section. This section covers bare-metal installs where Direttore runs directly under `systemd` and nginx provides TLS termination.
 
-Example configs live in [`docs/nginx/`](docs/nginx/):
+Config files live in [`docs/nginx/`](docs/nginx/):
 
 | File | Purpose |
 |---|---|
-| [`direttore.conf`](docs/nginx/direttore.conf) | Main server block (HTTP + HTTPS variants) |
-| [`websocket_map.conf`](docs/nginx/websocket_map.conf) | `map` block required for WebSocket/HMR support — goes in `http {}` context |
+| [`direttore.conf`](docs/nginx/direttore.conf) | Main server block — HTTP→HTTPS redirect, TLS, upstream proxy |
+| [`websocket_map.conf`](docs/nginx/websocket_map.conf) | `map` block for WebSocket / Vite HMR — goes in the `http {}` context |
 
 ### URL routing
 
-| Path prefix | Upstream |
+| Path | Upstream |
 |---|---|
-| `/api/*` | FastAPI backend — `127.0.0.1:8000` |
-| `/docs`, `/redoc`, `/openapi.json` | FastAPI Swagger/ReDoc (from backend) |
-| `/` (everything else) | React frontend — `127.0.0.1:5173` |
+| `/api/*` | FastAPI backend — `[::1]:8000` |
+| `/docs`, `/redoc`, `/openapi.json` | FastAPI Swagger / ReDoc |
+| `/` (everything else) | React (Vite dev `[::1]:5173`, or built `dist/` served by nginx) |
 
-Vite's HMR WebSocket is served on the same port as the dev server and is handled transparently via the `$connection_upgrade` map — no separate path needed.
+### Step 1 — Get a TLS certificate
 
-> [!IMPORTANT]
-> **Vite host check** — Vite's dev server rejects any request whose `Host` header isn't `localhost`/`127.0.0.1`. When nginx proxies from a real hostname (e.g. `netserv.example.com`), Vite returns an *"Invalid Host header"* error. The `vite.config.js` in this repo already sets `allowedHosts: 'all'` and `host: '::1'` to fix this. If you see a blank page or that error, make sure the Vite dev server was **restarted** after the config change.
-
-### Install (bare-metal)
+**Option A — Let's Encrypt via Certbot (recommended for public-facing hosts)**
 
 ```bash
-# 1. Install the map snippet (http context — required for WebSocket support)
+sudo apt install certbot python3-certbot-nginx   # Debian/Ubuntu
+sudo certbot --nginx -d direttore.example.com
+```
+
+Certbot will edit nginx config automatically and schedule auto-renewal. Skip to Step 3 once done.
+
+**Option B — Let's Encrypt via standalone (no nginx running yet)**
+
+```bash
+sudo certbot certonly --standalone -d direttore.example.com
+# Certificates written to /etc/letsencrypt/live/direttore.example.com/
+```
+
+**Option C — Bring your own certificate**
+
+Place your cert and key at any path and update `ssl_certificate` / `ssl_certificate_key` in `direttore.conf` accordingly.
+
+**Auto-renewal** (certbot installs a systemd timer automatically; verify with):
+
+```bash
+sudo systemctl status certbot.timer
+sudo certbot renew --dry-run
+```
+
+### Step 2 — Install nginx config
+
+```bash
+# 1. Install the WebSocket map snippet (http context — required for Vite HMR)
 sudo cp docs/nginx/websocket_map.conf /etc/nginx/conf.d/
 
 # 2. Install the site config
 sudo cp docs/nginx/direttore.conf /etc/nginx/sites-available/direttore
 sudo ln -s /etc/nginx/sites-available/direttore /etc/nginx/sites-enabled/
 
-# 3. Edit server_name + certificate paths, then validate and reload
+# 3. Edit the two server_name lines and the ssl_certificate paths
+sudo nano /etc/nginx/sites-available/direttore
+
+# 4. Validate and reload
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-> **No TLS yet?** `direttore.conf` includes a commented-out plain HTTP server block at the bottom — use that for internal networks or staging.
+### Step 3 — Verify upstream addresses
 
-> **Docker Compose:** replace `127.0.0.1:8000` / `127.0.0.1:5173` with `api:8000` / `frontend:80` and add `resolver 127.0.0.11 valid=10s;` inside the server block.
+The default `direttore.conf` uses `[::1]:8000` (IPv6 loopback) for the FastAPI upstream and `[::1]:5173` for Vite. This matches the default `--host ::` in both `Dockerfile.api` and `vite.config.js`.
+
+If your systemd services still bind to `0.0.0.0` (IPv4 only), change the upstream `server` lines in `direttore.conf` back to `127.0.0.1:8000` / `127.0.0.1:5173`, or update the service to use `--host ::`.
+
+### Step 4 — Set CORS origins
+
+nginx terminates TLS, so the browser reaches the API as `https://direttore.example.com`. Add that origin to `.env`:
+
+```
+API_CORS_ORIGINS=https://direttore.example.com
+```
+
+Restart the API after changing `.env`:
+
+```bash
+sudo systemctl restart direttore-api
+```
+
+### IPv6 considerations
+
+The `direttore.conf` upstream block and both `listen` directives already support dual-stack:
+
+```nginx
+listen 80;          # IPv4
+listen [::]:80;     # IPv6
+listen 443 ssl;
+listen [::]:443 ssl;
+```
+
+The OCSP resolver list includes both IPv4 and IPv6 addresses (`1.1.1.1`, `8.8.8.8`, `2606:4700:4700::1111`, `2001:4860:4860::8888`) so stapling works on IPv6-only hosts.
+
+For an **IPv6-only** host, ensure your DNS has an AAAA record for the domain and that the Let's Encrypt CA can reach port 80 over IPv6 during the HTTP-01 challenge.
+
+### No TLS yet?
+
+`direttore.conf` includes a commented-out plain HTTP server block at the bottom — uncomment it and delete the HTTPS blocks for internal/staging use.
+
+> [!IMPORTANT]
+> **Vite host check** — Vite's dev server rejects requests whose `Host` header doesn't match `localhost`/`127.0.0.1`. When nginx proxies from a real hostname, Vite returns an *"Invalid Host header"* error. `vite.config.js` already sets `allowedHosts: 'all'` to prevent this. If you see a blank page, make sure Vite was **restarted** after any config change.
 
 ---
 
@@ -616,18 +697,23 @@ sudo systemctl status direttore-api
 
 ### Quick-start (production — Traefik + Let's Encrypt)
 
-`docker-compose.yml` uses [Traefik](https://traefik.io) as the sole externally-exposed service. Traefik automatically obtains and renews a Let's Encrypt certificate for your domain and redirects all HTTP traffic to HTTPS. The `api` and `frontend` services are not reachable from outside the host — only Traefik can reach them.
+`docker-compose.yml` uses [Traefik](https://traefik.io) as the sole externally-exposed service. Traefik automatically obtains and renews a Let's Encrypt certificate for your domain and redirects all HTTP traffic to HTTPS. The `api` and `frontend` services are not reachable from outside the host — only Traefik can reach them. Traffic to `/api/*` is routed directly to the FastAPI backend (WebSocket and SSE work natively); everything else goes to the nginx frontend container.
 
 **Prerequisites:**
 - Port 80 and 443 open on the host firewall
 - DNS for `DOMAIN` resolving to this host **before** you start the stack (Let's Encrypt performs an HTTP-01 challenge on first boot)
+- For IPv6 / dual-stack: Docker daemon IPv6 enabled — see [docs/daemon-ipv6.md](docs/daemon-ipv6.md)
 
 ```bash
 cp .env.example .env
 # Required: set your public hostname and ACME email
 # DOMAIN=direttore.example.com
 # ACME_EMAIL=admin@example.com
-# Also set PROXMOX_MOCK=true if no real Proxmox
+#
+# Stack mode (defaults to dual-stack / IPv6-preferred):
+# TRAEFIK_HOST_IP=::        # or 0.0.0.0 for IPv4-only
+# TRAEFIK_BIND_ADDR=[::]    # or 0.0.0.0 for IPv4-only
+# ENABLE_IPV6=true          # set false for IPv4-only
 
 docker compose up -d
 ```
